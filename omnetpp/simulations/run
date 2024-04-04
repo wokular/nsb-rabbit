@@ -1,0 +1,4 @@
+#!/bin/sh
+cd `dirname $0`
+../src/nsb_wireless_dev -n .:../src $*
+# for shared lib, use: opp_run -l ../src/nsb_wireless_dev -n .:../src $*

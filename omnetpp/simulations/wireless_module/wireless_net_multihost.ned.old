@@ -1,0 +1,33 @@
+package nsb_wireless_dev.simulations.wireless_module;
+
+import inet.networklayer.configurator.ipv4.Ipv4NetworkConfigurator;
+import inet.node.contract.INetworkNode;
+import inet.physicallayer.wireless.common.contract.packetlevel.IRadioMedium;
+import inet.visualizer.contract.IIntegratedVisualizer;
+
+network WirelessB extends WirelessA
+{
+    @display("bgb=769.2048,535.9536");
+    submodules:
+        hostR1: <default("WirelessHost")> like INetworkNode {
+            @display("p=273.168,225.792");
+        }
+        hostR2: <default("WirelessHost")> like INetworkNode {
+            @display("p=198.576,396.144");
+        }
+        hostR3: <default("WirelessHost")> like INetworkNode {
+            @display("p=352.80002,396.144");
+        }
+        hostR4: <default("WirelessHost")> like INetworkNode {
+            @display("p=273.168,337.68002");
+        }
+        hostR5: <default("WirelessHost")> like INetworkNode {
+            @display("p=273.168,396.144");
+        }
+        hostR6: <default("WirelessHost")> like INetworkNode {
+            @display("p=335.664,255.024");
+        }
+        hostR7: <default("WirelessHost")> like INetworkNode {
+            @display("p=406.224,321.048");
+        }
+}

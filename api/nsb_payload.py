@@ -1,0 +1,107 @@
+
+import struct
+
+HOST = "127.0.0.1"
+PORT = 65432
+
+CH_HEADER_FORMAT = "=BIII"
+CH_HEADER_SIZE = struct.calcsize(CH_HEADER_FORMAT)
+
+OH_HEADER_FORMAT = "=BIIII"
+OH_HEADER_SIZE = struct.calcsize(OH_HEADER_FORMAT)
+
+# CH_SEND_MSG_FORMAT = "IdI"
+# CH_SEND_MSG_SIZE = struct.calcsize("="+CH_SEND_MSG_FORMAT)
+
+CH_SEND_MSG_ACK_FORMAT = "bI"
+CH_SEND_MSG_ACK_SIZE = struct.calcsize("="+CH_SEND_MSG_ACK_FORMAT)
+
+CH_MSG_GETSTATE_FORMAT = "I"
+CH_MSG_GETSTATE_SIZE = struct.calcsize("="+CH_MSG_GETSTATE_FORMAT)
+
+CH_MSG_STATE_FORMAT = "BI"
+CH_MSG_STATE_SIZE = struct.calcsize("="+CH_MSG_STATE_FORMAT)
+
+CH_RECV_MSG_FORMAT = ""
+CH_RECV_MSG_SIZE = struct.calcsize("="+CH_RECV_MSG_FORMAT)
+
+MSGID_FORMAT = "I"
+MSGID_SIZE = struct.calcsize("="+MSGID_FORMAT)
+
+OH_RECV_MSG_FORMAT = ""
+OH_RECV_MSG_SIZE = struct.calcsize("="+OH_RECV_MSG_FORMAT)
+
+OH_DELIVER_MSG_ACK_FORMAT = "b"
+OH_DELIVER_MSG_ACK_SIZE = struct.calcsize("="+OH_DELIVER_MSG_ACK_FORMAT)
+
+class MSG_Q(object):
+    MSGQ_TX             = 1
+    MSGQ_TRANSIT        = 2
+    MSGQ_RX             = 3
+    
+    NAMES = {
+        MSGQ_TX: "MSGQ_TX",
+        MSGQ_TRANSIT: "MSGQ_TRANSIT",
+        MSGQ_RX: "MSGQ_RX"
+    }
+
+class MSG_TYPES(object):
+    CH_SEND_MSG         = 1
+    CH_SEND_MSG_ACK     = 2
+    CH_RECV_MSG         = 3
+    CH_RESP_MSG         = 4
+    CH_MSG_GETSTATE     = 5
+    CH_MSG_STATE        = 6
+
+    CH_MSGS_END         = 30
+
+    OH_DELIVER_MSG      = 31
+    OH_DELIVER_MSG_ACK  = 32
+    OH_RECV_MSG         = 33
+    OH_RESP_MSG         = 34
+    OH_MSG_GETSTATE     = 35
+    OH_MSG_STATE        = 36
+
+    NAMES = {
+        CH_SEND_MSG: "CH_SEND_MSG",
+        CH_SEND_MSG_ACK: "CH_SEND_MSG_ACK",
+        CH_RECV_MSG: "CH_RECV_MSG",
+        CH_RESP_MSG: "CH_RESP_MSG",
+        CH_MSG_GETSTATE: "CH_MSG_GETSTATE",
+        CH_MSG_STATE: "CH_MSG_STATE",
+
+        OH_DELIVER_MSG: "OH_DELIVER_MSG",
+        OH_DELIVER_MSG_ACK: "OH_DELIVER_MSG_ACK",
+        OH_RECV_MSG: "OH_RECV_MSG",
+        OH_RESP_MSG: "OH_RESP_MSG",
+        OH_MSG_GETSTATE: "OH_MSG_GETSTATE",
+        OH_MSG_STATE: "OH_MSG_STATE"
+    }
+
+class MSG_STATE(object):
+    MSG_STATE_NOTFOUND      = 1
+    MSG_STATE_QUEUED        = 2
+    MSG_STATE_INTRANSIT     = 3
+    MSG_STATE_DELIVERED     = 4 # NOT USED
+
+    NAMES = {
+        MSG_STATE_NOTFOUND: "MSG_STATE_NOTFOUND",
+        MSG_STATE_QUEUED: "MSG_STATE_QUEUED",
+        MSG_STATE_INTRANSIT: "MSG_STATE_INTRANSIT",
+        MSG_STATE_DELIVERED: "MSG_STATE_DELIVERED"
+    }
+
+class ERROR_CODES(object):
+    SUCCESS                     = 0
+    MESSAGE_NOT_FOUND           = 1
+    MESSAGE_ALREADY_DELIVERED   = 2
+    MESSAGE_IN_WRONG_QUEUE      = 3
+    MESSAGE_TO_SELF             = 4
+
+    NAMES = {
+        SUCCESS: "SUCCESS",
+        MESSAGE_NOT_FOUND: "MESSAGE_NOT_FOUND",
+        MESSAGE_ALREADY_DELIVERED: "MESSAGE_ALREADY_DELIVERED",
+        MESSAGE_IN_WRONG_QUEUE: "MESSAGE_IN_WRONG_QUEUE",
+        MESSAGE_TO_SELF: "MESSAGE_TO_SELF"
+    }
