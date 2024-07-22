@@ -1,7 +1,9 @@
-# nsb
- Network Simulation Bridge
+# nsb: network simulation bridge
+_**Documentation in progress. For currently available information, please check out our publication at ACM MSWIM 2023.**_
+Harikrishna S. Kuttivelil, Shesha Sreenivasamurthy, Lakshmi Krishnaswamy, Nayan Bhatia, and Katia Obraczka. 2023. [Network Simulation Bridge: Bridging Applications to Network Simulators.](https://dl.acm.org/doi/10.1145/3616391.3622771) In Proceedings of the 19th ACM International Symposium on QoS and Security for Wireless and Mobile Networks (Q2SWinet '23). Association for Computing Machinery, New York, NY, USA, 39–46. https://doi.org/10.1145/3616391.3622771
 
 ## UC Santa Cruz Noncommercial License
+*This license will be replaced with an open-source license soon.*
 
 ### Acceptance
 In order to get any license under these terms, you must agree to them as both strict obligations and conditions to all your licenses.
