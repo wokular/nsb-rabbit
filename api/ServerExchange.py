@@ -13,13 +13,18 @@ import struct
 
 import logging
 
+# Rabbit
+import pika
+
 logging.basicConfig(format='%(asctime)s %(name)s %(levelname)s: %(message)s',)
 # Client logger.
 clog = logging.getLogger('(client)')
-clog.setLevel(logging.INFO)
+# INFO by default
+clog.setLevel(logging.DEBUG)
 # Server logger.
 slog = logging.getLogger('(server)')
-slog.setLevel(logging.INFO)
+# INFO by default
+slog.setLevel(logging.DEBUG)
 
 # Create message counter to generate IDs.
 G_MSGID             = -1
@@ -356,6 +361,7 @@ class NSBServerTracker:
             if self.entries[msgid].end_time == None or self.entries[msgid].latency == None:
                 # Add to list of entries to remove.
                 to_delete.append(msgid)
+        # Why not just del self.entries[msgid] above?
         for msgid in to_delete:
             del self.entries[msgid]
         # Return the the number of remaining entries and number of entries removed.
@@ -507,6 +513,7 @@ class NSBServer(object):
             # At event, it should be ready for read. Read the header first
             header, pktData = self.recvData(sock)
         # If header is None, then the connection is closed.
+        ### Debugging for protobuf: here shows that header and header.type exist and does not return here, unlike in protobuf version
         if not header or not header.type:
             return
         # Use the header to look up the client to return a Client object.
@@ -517,6 +524,9 @@ class NSBServer(object):
             raise ClientNotFoundError(f"Client not found.\nHeader information:\n{header}")
         # If the client is found, then service the connection.
         slog.debug(f"Service connection for client {client.clientIp}/{client.nodeId}")
+        
+        # Client contains the client that sent the message to the server
+        
         if header.type == nsbp.MSG_TYPES.CH_SEND_MSG:
             """
             CH_SEND_MSG: Application is requesting to send a message through the network.
@@ -679,6 +689,7 @@ class NSBServer(object):
             if header.srcid in self.ip_reference:
                 return self.ip_reference[header.srcid]
         return None # Default
+
 
 if __name__ == '__main__':
     import argparse

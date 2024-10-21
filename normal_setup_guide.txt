@@ -1,0 +1,18 @@
+Quick guide for getting a test version up and running with RabbitMQ
+
+1) Set up a python venv for installing dependencies if you haven't already, and ensure you have Docker installed
+2) Activate the venv: `source user/path/to/.venv/bin/activate`
+3) Install dependencies into virtual environment:
+`pip3 install aioconsole` - Used for logging
+`pip3 install pika` - Library for RabbitMQ for python
+4) Start the RabbitMQ broker via Docker in a new non-venv shell
+4a) If you wish to use the management version:
+Create a Docker container: docker run -it --name rabbitmqmanagement -p 5672:5672 -p 15672:15672 rabbitmq:3.9-management
+Start an existing Docker container: docker start -i rabbitmqmanagement
+(app monitoring available at http://localhost:15672/, login/pw both 'guest')
+4b) If you wish to use the normal version:
+Create a Docker container: docker run -it --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3.9
+Start an existing Docker container: docker start -i rabbitmq
+Note: you can set any name for your Docker containers, the ones I provided are descriptive enough for me
+8) Run the server: `python3 nsb_server.py -m aliasmap.txt` where aliasmap.txt is any map of nodes
+9) Run the app client: `python3 nsb_client.py -m aliasmap.txt -a -r 20` where again aliasmap.txt is any map of nodes

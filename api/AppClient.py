@@ -11,8 +11,11 @@ import os
 import asyncio
 from aioconsole import ainput
 
-# Set up logging for server.
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',)
+# Rabbit
+import pika
+
+# Set up logging for server. // logging .INFO by default
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',)
 logger = logging.getLogger(f"(client)")
 rlog = logging.getLogger(f"(receiver)")
 # Set rlog level to DEBUG.
@@ -237,7 +240,7 @@ async def test_receiver(connector : NSBApplicationClient, aliases : list, pollin
         # Loop through the aliases.
         for alias in this_aliases:
             # Print the alias.
-            rlog.debug(f"\t> {alias}")
+            rlog.debug(f"Alias\t> {alias}")
             # Receive a message.
             reply = connector.receive(alias)
             # If the reply is not None, print the message receive information.
