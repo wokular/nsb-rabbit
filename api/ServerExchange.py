@@ -22,11 +22,11 @@ logging.basicConfig(format='%(asctime)s %(name)s %(levelname)s: %(message)s',)
 # Client logger.
 clog = logging.getLogger('(client)')
 # INFO by default
-clog.setLevel(logging.DEBUG)
+clog.setLevel(logging.INFO)
 # Server logger.
 slog = logging.getLogger('(server)')
 # INFO by default
-slog.setLevel(logging.DEBUG)
+slog.setLevel(logging.INFO)
 
 # Create message counter to generate IDs.
 G_MSGID             = -1
@@ -83,6 +83,7 @@ class Client(object):
         self.txq = list()
         self.transitq = list()
         self.rxq = list()
+        
         clog.info(f"\tClient {clientIp} initialized.")
 
     def add2q(self, msg, dstq):
@@ -134,8 +135,10 @@ class Client(object):
         Returns the state of the message.
         """
         # First get the server msgid from the client-provided msgid
+        print("client msg id: ", msgid)
+        if not msgid in self.dualmsgidmap: return None
         msgid = self.dualmsgidmap[msgid]
-        
+        print("server msg id: ", msgid)
         # Check if message exists.
         if msgid not in self.msgmap:
             return nsbp.MSG_STATE.MSG_STATE_NOTFOUND
@@ -161,10 +164,10 @@ class Client(object):
         if (header.srcid == header.dstid):
             return (nsbp.ERROR_CODES.MESSAGE_TO_SELF, None)
         # Create an ID for tracking the message, as well as the message
-        msg_id = header.clientmsgid
-        if msg_id == None:
-            msg_id = get_msg_id()
-        msg = Msg(msg_id, header, pktData)
+        client_msg_id = header.clientmsgid
+        server_msg_id = str(get_msg_id())
+        msg = Msg(server_msg_id, header, pktData)
+        self.dualmsgidmap[client_msg_id] = server_msg_id
         # Add to transmit queue.
         self.add2q(msg, nsbp.MSG_Q.MSGQ_TX)
         # Log.
@@ -200,6 +203,7 @@ class Client(object):
         clog.debug(f"\tFound message ID: {msgid}")
         # Get message state.
         state = self.getMsgState(msgid)
+        # Would need to make sure it can handle state of None
         clog.debug(f"\tMessage state: {state}")
         # Create format.
         fmt = nsbp.CH_HEADER_FORMAT + nsbp.CH_MSG_STATE_FORMAT
@@ -494,12 +498,17 @@ class NSBServer(object):
         self._stopping = False
         self._MAINEXCHANGE = "main_router"
         
-        # Store the various queues here
+        # Store the various queues and their tag IDs here
         self._ch_send_msg_q = None
         self._ch_msg_getstate_q = None
         self._ch_recv_msg_q = None
         self._oh_recv_msg_q = None
         self._oh_deliver_msg_q = None
+        self._ch_send_msg_q_tag = None
+        self._ch_msg_getstate_q_tag = None
+        self._ch_recv_msg_q_tag = None
+        self._oh_recv_msg_q_tag = None
+        self._oh_deliver_msg_q_tag = None
         
     def on_connection_open(self, connection_obj):
         slog.info("Connection was established.")
@@ -610,18 +619,21 @@ class NSBServer(object):
         
         slog.info(f"Starting to consume on {queue_name}.")
         if queue_name == self._ch_send_msg_q:
-            self._channel.basic_consume(queue=self._ch_send_msg_q, on_message_callback=self.ch_send_msg_consumer, auto_ack=False)
+            self._ch_send_msg_q_tag = self._channel.basic_consume(queue=self._ch_send_msg_q, on_message_callback=self.ch_send_msg_consumer, auto_ack=True)
         elif queue_name == self._ch_msg_getstate_q:
-            self._channel.basic_consume(queue=self._ch_msg_getstate_q, on_message_callback=self.ch_msg_getstate_consumer, auto_ack=False)
+            self._ch_msg_getstate_q_tag = self._channel.basic_consume(queue=self._ch_msg_getstate_q, on_message_callback=self.ch_msg_getstate_consumer, auto_ack=True)
         elif queue_name == self._ch_recv_msg_q:
-            self._channel.basic_consume(queue=self._ch_recv_msg_q, on_message_callback=self.ch_recv_msg_consumer, auto_ack=False)
+            self._ch_recv_msg_q_tag = self._channel.basic_consume(queue=self._ch_recv_msg_q, on_message_callback=self.ch_recv_msg_consumer, auto_ack=True)
         elif queue_name == self._oh_recv_msg_q:
-            self._channel.basic_consume(queue=self._oh_recv_msg_q, on_message_callback=self.oh_recv_msg_consumer, auto_ack=False)
+            self._oh_recv_msg_q_tag = self._channel.basic_consume(queue=self._oh_recv_msg_q, on_message_callback=self.oh_recv_msg_consumer, auto_ack=False)
         elif queue_name == self._oh_deliver_msg_q:
-            self._channel.basic_consume(queue=self._oh_deliver_msg_q, on_message_callback=self.oh_deliver_msg_consumer, auto_ack=False)
+            self._oh_deliver_msg_q_tag = self._channel.basic_consume(queue=self._oh_deliver_msg_q, on_message_callback=self.oh_deliver_msg_consumer, auto_ack=False)
         else:
             slog.error("Queue not found.")
             self.stop()
+            
+    def on_cancelok(self, _unused_frame, queue_name):
+        slog.info(f"RabbitMQ successfully closed queue {queue_name}")
         
     def run(self):
         """
@@ -630,71 +642,38 @@ class NSBServer(object):
         """
         
         # Event loop that handles both errors from Pika and others
-        t = 0
-        while not self._stopping and t < 1:
-            t+=1
-            try:
-                # Create our base connection (SelectConnection vs BlockingConnection because we don't want our callbacks to block)
-                # self._connection = pika.SelectConnection(pika.URLParameters(url=self._rabbiturl))
-                slog.info("Attempting to establish connection...")
-                self._connection = pika.SelectConnection(pika.URLParameters(url=self._rabbiturl), on_open_callback=self.on_connection_open, on_open_error_callback=self.on_connection_open_error, on_close_callback=self.on_connection_closed)
-                
-                slog.info("Server is starting IOLoop.")
-                self._connection.ioloop.start()
+        # while not self._stopping:
+        try:
+            # Create our base connection (SelectConnection vs BlockingConnection because we don't want our callbacks to block)
+            slog.info("Attempting to establish connection...")
+            self._connection = pika.SelectConnection(pika.URLParameters(url=self._rabbiturl), on_open_callback=self.on_connection_open, on_open_error_callback=self.on_connection_open_error, on_close_callback=self.on_connection_closed)
+            
+            slog.info("Server is starting IOLoop.")
+            self._connection.ioloop.start()
             
             
-                # Declare our exchange and bind our various message queues to this routing exchange
-                # self._channel.exchange_declare(exchange="main_router", exchange_type="direct")
-                
-                # result = self._channel.queue_declare(queue="CH_SEND_MSG_Q")
-                # ch_send_msg_q = result.method.queue
-                # self._channel.queue_bind(queue=ch_send_msg_q, exchange="main_router", routing_key="CH_SEND_MSG")
-                
-                # result = self._channel.queue_declare(queue="CH_MSG_GETSTATE_Q")
-                # ch_msg_getstate_q = result.method.queue
-                # self._channel.queue_bind(queue=ch_msg_getstate_q, exchange="main_router", routing_key="CH_MSG_GETSTATE")
-                
-                # result = self._channel.queue_declare(queue="CH_RECV_MSG_Q")
-                # ch_recv_msg_q = result.method.queue
-                # self._channel.queue_bind(queue=ch_recv_msg_q, exchange="main_router", routing_key="CH_RECV_MSG")
-                
-                # result = self._channel.queue_declare(queue="OH_RECV_MSG_Q")
-                # oh_recv_msg_q = result.method.queue
-                # self._channel.queue_bind(queue=oh_recv_msg_q, exchange="main_router", routing_key="OH_RECV_MSG")
-                
-                # result = self._channel.queue_declare(queue="OH_DELIVER_MSG_Q")
-                # oh_deliver_msg_q = result.method.queue
-                # self._channel.queue_bind(queue=oh_deliver_msg_q, exchange="main_router", routing_key="OH_DELIVER_MSG")
-                
-                
-                # # Start consuming on these various queues
-                # self._channel.basic_qos(prefetch_count=1)
-                # self._channel.basic_consume(queue=ch_send_msg_q, on_message_callback=self.ch_send_msg_consumer, auto_ack=False)
-                # self._channel.basic_consume(queue=ch_msg_getstate_q, on_message_callback=self.ch_msg_getstate_consumer, auto_ack=False)
-                # self._channel.basic_consume(queue=ch_recv_msg_q, on_message_callback=self.ch_recv_msg_consumer, auto_ack=False)
-                # self._channel.basic_consume(queue=oh_recv_msg_q, on_message_callback=self.oh_recv_msg_consumer, auto_ack=False)
-                # self._channel.basic_consume(queue=oh_deliver_msg_q, on_message_callback=self.oh_deliver_msg_consumer, auto_ack=False)
-                
-                # self._consuming = True
-                
-                
-            # Don't recover if connection was closed by broker or a client
-            except pika.exceptions.ConnectionClosedByBroker:
-                self.stop()
-                break
-            except pika.exceptions.ConnectionClosedByClient:
-                self.stop()
-                break
-            # Don't recover on channel errors
-            except pika.exceptions.AMQPChannelError:
-                self.stop()
-                break
-            # Recover on all other connection errors
-            except pika.exceptions.AMQPConnectionError:
-                continue
-            except KeyboardInterrupt:
-                self.stop()
-                break
+        # Don't recover if connection was closed by broker or a client
+        except pika.exceptions.ConnectionClosedByBroker:
+            slog.error("Connection closed by broker, stopping...")
+            self.stop()
+            # break
+        except pika.exceptions.ConnectionClosedByClient:
+            slog.error("Connection closed by client, stopping...")
+            self.stop()
+            # break
+        # Don't recover on channel errors
+        except pika.exceptions.AMQPChannelError:
+            slog.error("AQMP channel error, stopping...")
+            self.stop()
+            # break
+        # Recover on all other connection errors
+        except pika.exceptions.AMQPConnectionError:
+            slog.warning("AQMP connection error, attempting to continue...")
+            # continue
+        except KeyboardInterrupt:
+            slog.warning("Keyboard interrupt detected, stopping...")
+            self.stop()
+            # break
         
         
         
@@ -762,8 +741,22 @@ class NSBServer(object):
         self._stopping = True
         self._consuming = False
         if self._channel is not None:
+            
+            slog.info("Clearing existing queues on server")
+            cb = functools.partial(self.on_cancelok, queue_name=self._ch_send_msg_q)
+            self._channel.basic_cancel(self._ch_send_msg_q_tag)
+            cb = functools.partial(self.on_cancelok, queue_name=self._ch_msg_getstate_q)
+            self._channel.basic_cancel(self._ch_msg_getstate_q_tag, cb)
+            cb = functools.partial(self.on_cancelok, queue_name=self._ch_recv_msg_q)
+            self._channel.basic_cancel(self._ch_recv_msg_q_tag, cb)
+            cb = functools.partial(self.on_cancelok, queue_name=self._oh_recv_msg_q)
+            self._channel.basic_cancel(self._oh_recv_msg_q_tag, cb)
+            cb = functools.partial(self.on_cancelok, queue_name=self._oh_deliver_msg_q)
+            self._channel.basic_cancel(self._oh_deliver_msg_q_tag, cb)
+            
             slog.info(f"Closing channel on server consumer")
             self._channel.close()
+            
         if self._connection is not None:
             slog.info(f"Closing connection on server consumer")
             # We want to close the connection because when the server is stopped, we don't want 
@@ -810,18 +803,19 @@ class NSBServer(object):
         slog.info(f"CH_SEND_MSG received from {client.clientIp}/{client.nodeId}...")
         
         # Create a new message and store it.
+        print("Message is ", message)
         (rc, msg) = client.createNewMessage(header, message)
         
         msgid = 0
         if msg: msgid = msg.id
         
         # Start tracking the message.
-        if self.track_network_metrics:
-            self.tracker.addMessage(msgid, header.srcid, header.dstid, header.dataLen)
+        # Need to make sure we are using the correct message map
+        # if self.track_network_metrics:
+        #     self.tracker.addMessage(msgid, header.srcid, header.dstid, header.dataLen)
             
         # Send the client ID back to the server
         ch.basic_publish(exchange="", routing_key=props.reply_to, properties=pika.BasicProperties(correlation_id=props.correlation_id),body=str(msgid))
-        ch.basic_ack(delivery_tag=props.delivery_tag)
         
         
         
@@ -856,11 +850,14 @@ class NSBServer(object):
         slog.info(f"CH_MSG_GETSTATE received from {client.clientIp}/{client.nodeId}...")
         
         # Get the state of the message via the client
-        status = client.getMsgState(header.clientmsgid)
+        status = str(client.getMsgState(header.clientmsgid))
+        if status == None:
+            slog.warning(f"Client-provided msg id {header.clientmsgid} not found as valid mapping.")
+        
+        slog.info(f"Status: {status}")
         
         # Send a reply back to client and ack the original appclient message
         ch.basic_publish(exchange="", routing_key=props.reply_to, properties=pika.BasicProperties(correlation_id=props.correlation_id),body=status)
-        ch.basic_ack(delivery_tag=props.delivery_tag)
         
     def ch_recv_msg_consumer(self, ch, method, props, body):
         
@@ -892,12 +889,22 @@ class NSBServer(object):
         slog.info(f"CH_RECV_MSG received from {client.clientIp}/{client.nodeId}...")
         
         ####
-        message = client.getChRespMsg()
-        message = json.dumps(message)
+        # message = client.getChRespMsg()
+        returnMsg = {
+            "header": {
+                "type": nsbp.MSG_TYPES.CH_RESP_MSG,
+                "dataLen": 5,
+                "srcid": header.srcid,
+                "dstid": header.dstid,
+                "msgid": header.msgid,
+                "clientmsgid": header.clientmsgid
+            },
+            "body": "hello"
+        }
+        message = json.dumps(returnMsg)
         
         # Send a reply back to client and ack the original appclient message
         ch.basic_publish(exchange="", routing_key=props.reply_to, properties=pika.BasicProperties(correlation_id=props.correlation_id),body=message)
-        ch.basic_ack(delivery_tag=props.delivery_tag)
         
     def oh_recv_msg_consumer(self, ch, method, props, body):
         
@@ -1130,6 +1137,7 @@ class NSBServer(object):
         """
         Lookup the client object based on the header.
         """
+        clog.debug(f"Client lookup: srcid {header.srcid} dstid {header.dstid}")
         if header.type == nsbp.MSG_TYPES.OH_DELIVER_MSG:
             if header.dstid in self.node_reference:
                 return self.node_reference[header.dstid]
