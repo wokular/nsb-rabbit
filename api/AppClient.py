@@ -3,6 +3,7 @@ Send a simple set of byte messages to the server.
 """
 
 import socket
+
 import nsb_payload as nsbp
 import struct
 import logging
@@ -10,9 +11,13 @@ import random
 import os
 import asyncio
 from aioconsole import ainput
+import uuid
+import time
+import json
 
-# Rabbit
+# Rabbit/Pika
 import pika
+import pika.exceptions
 
 # Set up logging for server. // logging .INFO by default
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',)
@@ -51,84 +56,233 @@ def int_to_ip(ip_int):
     return ip
 
 class NSBApplicationClient:
-    def __init__(self, server_addr=NSB_SERVER_ADDR):
+    def __init__(self, clientId=None):
         """
         Initialize the client by creating and maintaining a connection to the server.
         """
-        # Create a socket.
-        self.sock = socket.socket()
-        # Connect to the server.
-        self.sock.connect((server_addr, nsbp.PORT))
-        # Get local IP address.
-        self.local_ip = socket.gethostbyname(socket.gethostname())
-
+        
+        self.clientId = clientId
+        
+        self._correlation_ids = []
+        self._connection = None
+        self._channel = None
+        self._rabbiturl = 'amqp://guest:guest@localhost:15672/%2F'
+        self._stopping = False
+        
+        self._ch_msg_getstate_q = None
+        self._ch_recv_msg_q = None
+        
+        # For receiving in an async environment, store the sent message correlation ids for lookup later
+        self._ch_send_msg_messages_corr_ids = dict()
+        self._ch_msg_getstate_messages_corr_ids = dict()
+        self._ch_recv_msg_messages_corr_ids = dict()
+        
+        # Create a dict to keep a client copy of each sent message's msgid the server assigned it,
+        # mapped to a value 
+        self.sent_msg_ids = dict()
+        
+        self._wait = 0.01
+        
     def __del__(self):
         """
         Close the connection to the server.
         """
-        # Close the socket.
-        self.sock.close()
+        self.stop()
         
-    def send(self, src_id, dest_id, message):
+    
+    def start(self):
+        
+        logger.info(f"Starting client connection for client {self.clientId}")
+        
+        # Connect to the server and keep attempting to connect if certain connection errors occur
+        while not self._stopping:
+            try:
+                
+                # Create our base connection (SelectConnection vs BlockingConnection because we don't want our callbacks to block)
+                # On the client, we are running generally assuming server is ran first, so the connection/channel stuff will be using an existing
+                # channel/connection vs creating a new one
+                # self._connection = pika.SelectConnection(pika.URLParameters(url=self._rabbiturl))
+                self._connection = pika.SelectConnection()
+                # Create our channel to communicate on
+                self._channel = self._connection.channel()
+                
+                # Redundant code
+                
+                # Set up the RPC response queue for getting a new message's msgid after its sent, a message's state and receiving simulator messages stored on server
+                self._ch_send_msg_q = self._channel.queue_declare(queue='', exclusive=True).method.queue
+                self._ch_msg_getstate_q = self._channel.queue_declare(queue='', exclusive=True).method.queue
+                self._ch_recv_msg_q = self._channel.queue_declare(queue='', exclusive=True).method.queue
+                
+                # Set up queue listening for our callback queues above
+                self._channel.basic_consume(queue=self._ch_send_msg_q, callback=self.ch_msg_getstate_q_callback, auto_ack=True)
+                self._channel.basic_consume(queue=self._ch_msg_getstate_q, callback=self.ch_msg_getstate_q_callback, auto_ack=True)
+                self._channel.basic_consume(queue=self._ch_recv_msg_q, callback=self.ch_recv_msg_q_callback, auto_ack=True)
+                
+                self._connection.ioloop.start()
+                
+    
+            # Don't recover if connection was closed by broker or a client
+            except pika.exceptions.ConnectionClosedByBroker:
+                self.stop()
+                break
+            except pika.exceptions.ConnectionClosedByClient:
+                self.stop()
+                break
+            # Don't recover on channel errors
+            except pika.exceptions.AMQPChannelError:
+                self.stop()
+                break
+            # Recover on all other connection errors
+            except pika.exceptions.AMQPConnectionError:
+                continue
+            except KeyboardInterrupt:
+                self.stop()
+                break
+            
+    # This function won't stop the main connection the server is running for the brokers,
+    # it only stops this client's channel connection to the server
+    def stop(self):
+        
+        logger.info(f"Stopping {self.clientId}")
+        self._stopping = True
+        if self._channel is not None:
+            logger.info(f"Closing channel on client with IP: {self.clientId}")
+            self._channel.close()
+            
+    ###
+    ### Some RPC callback handlers
+    ###
+            
+    def ch_send_msg_q_callback(self, ch, method, props, body):
         """
-        Send a message to the server.
+        A callback function to handle server replies to our initial ch_send_msg message.
+        These replies contain the msgid that was created and assigned to a particular message
         """
-        message_length = len(message)
-        # Convert IP addresses to integers.
-        src_bytes = ip_to_int(src_id)
-        dest_bytes = ip_to_int(dest_id)
-        # Print out types for nsbp.MSG_TYPES.CH_SEND_MSG, message_length, src_bytes, dest_bytes.
-        # logger.debug(f"nsbp.MSG_TYPES.CH_SEND_MSG: {type(nsbp.MSG_TYPES.CH_SEND_MSG)}")
-        # logger.debug(f"message_length: {type(message_length)}")
-        # logger.debug(f"src_bytes: {type(src_bytes)}")
-        # logger.debug(f"dest_bytes: {type(dest_bytes)}")
-        # Pack a message using the CH_HEADER_FORMAT struct.
-        header = struct.pack(nsbp.CH_HEADER_FORMAT, nsbp.MSG_TYPES.CH_SEND_MSG, message_length, src_bytes, dest_bytes)
-        logger.debug(f"Header: {header}")
-        # Concatenate the header and the message.
-        message = header + message
-        # Print the message bytes.
-        logger.debug(f"Full Message: {message}")
-        # Send the message.
-        self.sock.send(message)
+        # Put the message in the dictionary with the corresponding correlation id
+        logger.info("Client received msgid")
+        
+        # Add the msgid to self.sent_msg_ids with the original message
+        # Body contains the message's associated msgid
+        # Delete the temporary correlation_id/message pair
+        storedMsg = self.sent_msg_ids[props.correlation_id]
+        self.sent_msg_ids[body] = storedMsg
+        del self.sent_msg_ids[props.correlation_id]
+        
+        ch.basic_ack(delivery_tag=props.delivery_tag)
+            
+    def ch_msg_getstate_q_callback(self, ch, method, props, body):
+        """
+        A callback function to handle server replies to our initial ch_msg_getstate message
+        """
+        # Put the message in the dictionary with the corresponding correlation id
+        logger.info("Client received state of message")
+        # Body contains the status of a message
+        self._ch_msg_getstate_messages_corr_ids[props.correlation_id] = body
+        
+        ch.basic_ack(delivery_tag=props.delivery_tag)
+        
+    def ch_recv_msg_q_callback(self, ch, method, props, body):
+        """
+        A callback function to handle server replies to our initial ch_recv_msg message
+        """
+        # Put the message in the dictionary with the corresponding correlation id
+        logger.info("Client received message available from server")
+        self._ch_recv_msg_messages_corr_ids[props.correlation_id] = body
+        ch.basic_ack(delivery_tag=props.delivery_tag)
+    
+    ###
+    ### END RPC CALLBACK HANDLERS
+    ###
+        
+    def send(self, src_id, dest_id, message, msg_id=None):
+        """
+        Send a message to the server. 
+        An application using this as a client library can pass in an ID for the message being sent,
+        and that message's state can be tracked using the same ID. If no ID is provided, the server will 
+        automatically assign a client ID to the message, which will be available in self.sent_msg_ids as a mapping between the assigned ID and message
+        """
+        
+        
+        # Create a JSON structure to hold our data in a message
+        msg = {
+            "header": {
+                "type": nsbp.MSG_TYPES.CH_SEND_MSG,
+                "dataLen": len(message),
+                "srcid": src_id,
+                "dstid": dest_id,
+                "msgid": None,
+                "clientmsgid": msg_id
+            },
+            "body": json.dumps(message)
+        }
+        # Stringify it and send it to server
+        msg_str = json.dumps(msg)
+        
+        # Generate a corr_id to track the message on the client. This corr_id will 
+        # temporarily be used to track the sent message locally until the server can
+        # return the tracking id for the message (autoassigned if not provided)
+        corr_id = uuid.uuid4()
+        
+        # Send the message over to the server
+        # No need to check for an ack, Rabbit will automatically handle resending if the server doesn't send one
+        self._channel.basic_publish(exchange="main_router", routing_key="CH_SEND_MSG", properties=pika.BasicProperties(reply_to=self.ch_send_msg_q_callback, correlation_id=corr_id), body=msg_str)
+        
+        # Temporarily store the message with corr_id as the key (will be swapped to the client-provided/server-provided ID later)
+        self.sent_msg_ids[corr_id] = msg_str 
         logger.info(f"Sent message to server...")
-        # Listen for message.
-        reply = self.sock.recv(1024)
-        logger.debug(f"Reply: {reply}")
-        # Unpack the reply.
-        _reply = reply[:nsbp.CH_HEADER_SIZE]
-        msg_type, msg_len, src_id, dest_id = struct.unpack(nsbp.CH_HEADER_FORMAT, _reply)
-        # Check for CH_SEND_MSG_ACK.
-        if msg_type == nsbp.MSG_TYPES.CH_SEND_MSG_ACK:
-            logger.debug(f"\tServer sent ACK.")
-            ack_data = reply[nsbp.CH_HEADER_SIZE:]
-            # Print the ack data and the length.
-            logger.debug(f"\tACK Data: {ack_data}")
-            logger.debug(f"\tACK Data Length: {len(ack_data)}")
-            # Unpack the ack data for return code and message ID.
-            rc, msg_id = struct.unpack("="+nsbp.CH_SEND_MSG_ACK_FORMAT, ack_data)
-            logger.debug(f"\t\tReturn Code: {rc}")
-            # Check for success.
-            if rc == nsbp.ERROR_CODES.SUCCESS:
-                logger.debug(f"\t\tMessage ID: {msg_id}")
-                logger.info(f"Message sent successfully.")
-                return 0
-            else:
-                logger.error(f"Message not sent successfully.")
-                return 1
-        else:
-            logger.error(f"Message not sent successfully to the server. Unexpected response.")
+        
 
     def receive(self, dest_id):
         """
-        Receive a message from the server.
+        Receive and return a message from the server.
         """
         rlog.debug(f"Receiving message from server...")
-        # Convert the destination ID to an integer.
-        dest_bytes = ip_to_int(dest_id)
-        # Pack the message.
-        header = struct.pack(nsbp.CH_HEADER_FORMAT, nsbp.MSG_TYPES.CH_RECV_MSG, 0, 0, dest_bytes)
-        rlog.debug(f"\tHeader: {header}")
+        
+        # Create a JSON structure to hold our data in a message
+        message = ""
+        msg = {
+            "header": {
+                "type": nsbp.MSG_TYPES.CH_RECV_MSG,
+                "dataLen": len(message),
+                "srcid": None,
+                "dstid": dest_id,
+                "msgid": None,
+                "clientmsgid": None
+            },
+            "body": json.dumps(message)
+        }
+        # Stringify it and send it to server
+        msg_str = json.dumps(msg)
+        
+        corr_id = uuid.uuid4()
+        
+        # Send the message requesting available messages to the server
+        # Since this is an RPC, the response message will go to the ch_recv_msg_q_callback function
+        self._channel.basic_publish(exchange="main_router", routing_key="CH_RECV_MSG", body=msg_str, properties=pika.BasicProperties(reply_to=self.ch_recv_msg_q_callback, correlation_id=corr_id))
+        
+        ## Because Rabbit RPCs won't return to this context directly, let's access the returned message stored in 
+        ## self._ch_recv_msg_messages_corr_ids
+        ## Because the client is using a SelectConnection (async), we shouldn't block while waiting for a response from the server
+        ## that will be stored in self._ch_recv_msg_messages_corr_ids, but due to testing methods below, I'm still writing the functionality to 
+        ## block and wait for response in this function. 
+        
+        # Wait 2% longer each loop to allow more and more time for the server's response to be in the _ch_recv_msg_messages_corr_ids dict
+        wait = self._wait
+        increment = 1
+        while not self._ch_recv_msg_messages_corr_ids[corr_id]:
+            time.sleep(wait)
+            wait = self._wait * (1 + 0.02) ^ increment
+            increment += 1
+            # Make sure not an infinite loop
+            if (wait > 3):
+                return None
+            
+        # Return the message associated with the original request, and delete it
+        temp = self._ch_recv_msg_messages_corr_ids[corr_id]
+        del self._ch_recv_msg_messages_corr_ids[corr_id]
+        return temp
+        
+        """
         # Send the message.
         self.sock.send(header)
         rlog.debug(f"\tSent request to server...")
@@ -163,6 +317,60 @@ class NSBApplicationClient:
         else:
             rlog.error(f"Message not received successfully from the server. Unexpected response.")
         return None
+        """
+        
+    
+    def getMessageState(self, msgid):
+        """
+        Get the state of a message and return the state. For simplification purposes, this function requires a msgid passed in, which is the associated
+        id of a message. Client-libs can either provide this themselves or it will be created and returned by the server and stored in
+        self.sent_msg_ids as an ID/message mapping. Client-libs can use self.sent_msg_ids to find their message and the associated 
+        ID. Client-libs will be responsible for managing the msgid storage themselves
+        """
+        
+        rlog.debug(f"Sending a CH_MSG_GETSTATE message to server...")
+        
+        # Create a JSON structure to hold our data in a message
+        message = ""
+        msg = {
+            "header": {
+                "type": nsbp.MSG_TYPES.CH_MSG_GETSTATE,
+                "dataLen": len(message),
+                "srcid": None,
+                "dstid": None,
+                "msgid": None,
+                "clientmsgid": msgid
+            },
+            "body": json.dumps(message)
+        }
+        # Stringify it and send it to server
+        msg_str = json.dumps(msg)
+        
+        corr_id = uuid.uuid4()
+        
+        # Send the message requesting the state of a message to the server
+        self._channel.basic_publish(exchange="main_router", routing_key="CH_MSG_GETSTATE", body=msg_str, properties=pika.BasicProperties(reply_to=self.ch_msg_getstate_q_callback, correlation_id=corr_id))
+        
+        
+        # Following the same logic in receive()
+        # We need to wait for the _ch_msg_getstate_messages_corr_ids dict to hold the status of a message. Once it does, return the status
+        # Wait 2% longer each loop to allow more and more time for the server's response to be in the _ch_msg_getstate_messages_corr_ids dict
+        wait = self._wait
+        increment = 1
+        while not self._ch_msg_getstate_messages_corr_ids[corr_id]:
+            time.sleep(wait)
+            wait = self._wait * (1 + 0.02) ^ increment
+            increment += 1
+            # Make sure not an infinite loop
+            if (wait > 3):
+                return None
+            
+        # Return the status associated with the original request, and delete it
+        temp = self._ch_msg_getstate_messages_corr_ids[corr_id]
+        del self._ch_msg_getstate_messages_corr_ids[corr_id]
+        return temp
+        
+        
 
 async def test_sender(connector : NSBApplicationClient, aliases : list, auto=False, rate=None, size_bounds=[10, 100]):
     while True:

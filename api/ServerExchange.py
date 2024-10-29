@@ -6,10 +6,12 @@ import selectors
 import types
 import copy
 import time
+import functools
 
 from ctypes import *
 import nsb_payload as nsbp
 import struct
+import json
 
 import logging
 
@@ -46,6 +48,7 @@ class Header(object):
         self.srcid = None
         self.dstid = None
         self.msgid = None
+        self.clientmsgid = None
 
     def __str__(self):
         return "type %s dataLen %s srcid %s dstid %s msgid %s" % \
@@ -73,7 +76,9 @@ class Client(object):
         self.clientIp = clientIp
         self.nodeId = nodeId
         self.server = server
-        # Create a queue for each message state, including a message map.
+        # Create a queue for each message state, including a message map (and a client msg id to server msg id map).
+        # dualmsgidmap maintains a mapping of client msg ids to assigned server ids
+        self.dualmsgidmap = dict()
         self.msgmap = dict()
         self.txq = list()
         self.transitq = list()
@@ -128,6 +133,9 @@ class Client(object):
         """
         Returns the state of the message.
         """
+        # First get the server msgid from the client-provided msgid
+        msgid = self.dualmsgidmap[msgid]
+        
         # Check if message exists.
         if msgid not in self.msgmap:
             return nsbp.MSG_STATE.MSG_STATE_NOTFOUND
@@ -152,8 +160,11 @@ class Client(object):
         # Check that message is not to self.
         if (header.srcid == header.dstid):
             return (nsbp.ERROR_CODES.MESSAGE_TO_SELF, None)
-        # Create message.
-        msg = Msg(get_msg_id(), header, pktData)
+        # Create an ID for tracking the message, as well as the message
+        msg_id = header.clientmsgid
+        if msg_id == None:
+            msg_id = get_msg_id()
+        msg = Msg(msg_id, header, pktData)
         # Add to transmit queue.
         self.add2q(msg, nsbp.MSG_Q.MSGQ_TX)
         # Log.
@@ -204,7 +215,7 @@ class Client(object):
         """
         Sends a response to the application's request for received messages.
         """
-        clog.debug(f"Handling app request for received messages...")
+        clog.debug(f"Handling Client request for received messages...")
         pktData = ''.encode()
         # Check if there are any messages to send.
         if len (self.rxq) == 0:
@@ -229,6 +240,55 @@ class Client(object):
         clog.debug(f"\tResponse buffer length: {len(retbuf)}")
         sock.sendall(retbuf)
         clog.debug(f"\tResponse sent.")
+        
+    def getChRespMsg(self):
+        """
+        Similar to sendChRespMsg, but gets the message and returns it
+        """
+        clog.debug(f"Handling Client request for received messages...")
+
+        # Check if there are any messages to send.
+        if len (self.rxq) == 0:
+            clog.debug(f"\tNo messages to send.")
+            # If not, send a response with no data.
+            return None
+        else:
+            clog.info(f"\tMessage found. Forwarding to app client at {self.rxq[0]}...")
+            # If there are messages, send the first one (packed).
+            msgid = self.rxq.pop(0)
+                
+        
+            msg = self.msgmap[msgid]
+            # if DEBUG: print ("FORMAT %s" % fmt)
+            retbuf = struct.pack(fmt, nsbp.MSG_TYPES.CH_RESP_MSG,
+                len(msg.data), msg.header.srcid, msg.header.dstid, msg.data)
+            # Remove message from message map.
+            self.msgmap.pop(msgid)
+            
+            # For returning the message's associated clientid
+            temp = None
+            # Remove the clientmsgid/servermsgid mapping for this message
+            for clientmsgid, servermsgid in self.dualmsgidmap.items():
+                if servermsgid == msgid:
+                    temp = clientmsgid
+                    del self.dualmsgidmap[clientmsgid]
+                    break
+                
+            returnMsg = {
+                "header": {
+                    "type": nsbp.MSG_TYPES.CH_RESP_MSG,
+                    "dataLen": len(msg.data),
+                    "srcid": msg.header.srcid,
+                    "dstid": msg.header.dstid,
+                    "msgid": msg.header.msgid,
+                    "clientmsgid": temp
+                },
+                "body": json.dumps(msg.data)
+            }
+            
+            clog.info(f"\tMessage {msgid} retrieved and removed from message map.")
+            
+            return returnMsg
 
     def sendOhRespMsg(self, sock):
         """
@@ -424,9 +484,220 @@ class NSBServer(object):
             self.message_limit = message_limit
             slog.info(f"\tNetwork tracker initialized.")
         slog.info(f"Server initialized.")
+        
+        # Set up Rabbit-related properties
+        self._correlation_ids = []
+        self._connection = None
+        self._channel = None
+        self._rabbiturl = "amqp://guest:guest@localhost:5672/%2F"
+        self._consuming = False
+        self._stopping = False
+        self._MAINEXCHANGE = "main_router"
+        
+        # Store the various queues here
+        self._ch_send_msg_q = None
+        self._ch_msg_getstate_q = None
+        self._ch_recv_msg_q = None
+        self._oh_recv_msg_q = None
+        self._oh_deliver_msg_q = None
+        
+    def on_connection_open(self, connection_obj):
+        slog.info("Connection was established.")
+        self.open_channel()
+        
+    def on_connection_open_error(self,  _unused_connection, err):
+        slog.error("Server failed while opening connection: ", err)
+        # LOGGER.error('Connection open failed, reopening in 5 seconds: %s', err)
+        # self._connection.ioloop.call_later(5, self._connection.ioloop.stop) 
+        
+    def on_connection_closed(self, _unused_connection, reason):
+        """
+        This method is invoked by pika when the connection to RabbitMQ is
+        closed unexpectedly. Since it is unexpected, we will reconnect to
+        RabbitMQ if it disconnects.
+        """
+        slog.warning(f"Server connection closed unexpectedly: {reason}")
+        if self._stopping:
+            self.stop()
+        else:
+            slog.warning("Server will attempt to reconnect.")
+            # Add reconnect code here
+            
+        
+    def open_channel(self):
+        slog.info("Opening channel...")
+        # Create our channel to handle all messaging
+        self._connection.channel(on_open_callback=self.on_channel_open)
+    
+    def on_channel_open(self, channel):
+        # Store the channel object in self._channel
+        slog.info("Channel opened.")
+        self._channel = channel
+        # Add a channel closed callback to the channel
+        self._channel.add_on_close_callback(self.on_channel_closed)
+        # Setup the main exchange with some name
+        self.setup_exchange()
+        
+    def on_channel_closed(self, channel, reason):
+        """
+        Invoked by pika when RabbitMQ unexpectedly closes the channel.
+        """
+        slog.warning('Channel %i was closed unexpectedly: %s', channel, reason)
+        self._channel = None
+        if not self._stopping:
+            self._connection.close()
+         
+    # Will set up a direct exchange called "main_router" if thats what self._MAINEXCHANGE is set to.
+    # This will lead to func that will set 5 queues up, use carefully
+    def setup_exchange(self):
+        slog.info(f"Setting up exchange {self._MAINEXCHANGE}")
+        cb = functools.partial(self.on_exchange_declareok, exchange_name=self._MAINEXCHANGE)
+        self._channel.exchange_declare(exchange=self._MAINEXCHANGE, exchange_type="direct", callback=cb)
+        
+    # When the exchange was correctly declared
+    def on_exchange_declareok(self, _unused_frame, exchange_name):
+        """
+        Invoked by pika when RabbitMQ has finished the Exchange.Declare RPC
+        command.
+        """
+        slog.info('Exchange declared: %s', exchange_name)
+        self.setup_queues()
+        
+    # Set up our 5 consumer queues to monitor
+    # Start consuming in this same function
+    def setup_queues(self):
+        
+        slog.info("Server is setting up various queues.")
+        
+        cb = functools.partial(self.on_queue_declareok, queue_name="CH_SEND_MSG_Q", routing_key="CH_SEND_MSG")
+        self._ch_send_msg_q = "CH_SEND_MSG_Q"
+        self._channel.queue_declare(queue="CH_SEND_MSG_Q", callback=cb)
+        cb = functools.partial(self.on_queue_declareok, queue_name="CH_MSG_GETSTATE_Q", routing_key="CH_MSG_GETSTATE")
+        self._ch_msg_getstate_q = "CH_MSG_GETSTATE_Q"
+        self._channel.queue_declare(queue="CH_MSG_GETSTATE_Q", callback=cb)
+        cb = functools.partial(self.on_queue_declareok, queue_name="CH_RECV_MSG_Q", routing_key="CH_RECV_MSG")
+        self._ch_recv_msg_q = "CH_RECV_MSG_Q"
+        self._channel.queue_declare(queue="CH_RECV_MSG_Q", callback=cb)
+        cb = functools.partial(self.on_queue_declareok, queue_name="OH_RECV_MSG_Q", routing_key="OH_RECV_MSG")
+        self._oh_recv_msg_q = "OH_RECV_MSG_Q"
+        self._channel.queue_declare(queue="OH_RECV_MSG_Q", callback=cb)
+        cb = functools.partial(self.on_queue_declareok, queue_name="OH_DELIVER_MSG_Q", routing_key="OH_DELIVER_MSG")
+        self._oh_deliver_msg_q = "OH_DELIVER_MSG_Q"
+        self._channel.queue_declare(queue="OH_DELIVER_MSG_Q", callback=cb)
+        
+        # Set the qos and then start consuming
+        self._channel.basic_qos(prefetch_count=1)
+        
+        
+    # Bind a queue to the channel (queue_name and routing_key will be queue-specific, as defined in functools.partial above)
+    def on_queue_declareok(self, _unused_frame, queue_name, routing_key):
+        
+        slog.info(f"Queue {queue_name} with routing_key {routing_key} successfully declared.")
+        # Bind our queue to the channel
+        cb = functools.partial(self.on_bindok, queue_name=queue_name)
+        self._channel.queue_bind(queue=queue_name, exchange=self._MAINEXCHANGE, routing_key=routing_key, callback=cb)
+        
+    # If the bind succeeded, log the success
+    def on_bindok(self, _unused_frame, queue_name):
+        
+        slog.info(f"Successfully bound queue {queue_name} to exchange {self._MAINEXCHANGE}!")
+        self.start_consuming(queue_name=queue_name)
+        
+    def start_consuming(self, queue_name):
+        
+        # Start consuming messages from our various queues
+        self._consuming = True
+        
+        slog.info(f"Starting to consume on {queue_name}.")
+        if queue_name == self._ch_send_msg_q:
+            self._channel.basic_consume(queue=self._ch_send_msg_q, on_message_callback=self.ch_send_msg_consumer, auto_ack=False)
+        elif queue_name == self._ch_msg_getstate_q:
+            self._channel.basic_consume(queue=self._ch_msg_getstate_q, on_message_callback=self.ch_msg_getstate_consumer, auto_ack=False)
+        elif queue_name == self._ch_recv_msg_q:
+            self._channel.basic_consume(queue=self._ch_recv_msg_q, on_message_callback=self.ch_recv_msg_consumer, auto_ack=False)
+        elif queue_name == self._oh_recv_msg_q:
+            self._channel.basic_consume(queue=self._oh_recv_msg_q, on_message_callback=self.oh_recv_msg_consumer, auto_ack=False)
+        elif queue_name == self._oh_deliver_msg_q:
+            self._channel.basic_consume(queue=self._oh_deliver_msg_q, on_message_callback=self.oh_deliver_msg_consumer, auto_ack=False)
+        else:
+            slog.error("Queue not found.")
+            self.stop()
+        
     def run(self):
         """
-        Starts listening for connections and starts the main event loop.
+        Set up the various request consumers that clients (both app and sim) 
+        can send messages to. Combines a connect and start functionality into one function
+        """
+        
+        # Event loop that handles both errors from Pika and others
+        t = 0
+        while not self._stopping and t < 1:
+            t+=1
+            try:
+                # Create our base connection (SelectConnection vs BlockingConnection because we don't want our callbacks to block)
+                # self._connection = pika.SelectConnection(pika.URLParameters(url=self._rabbiturl))
+                slog.info("Attempting to establish connection...")
+                self._connection = pika.SelectConnection(pika.URLParameters(url=self._rabbiturl), on_open_callback=self.on_connection_open, on_open_error_callback=self.on_connection_open_error, on_close_callback=self.on_connection_closed)
+                
+                slog.info("Server is starting IOLoop.")
+                self._connection.ioloop.start()
+            
+            
+                # Declare our exchange and bind our various message queues to this routing exchange
+                # self._channel.exchange_declare(exchange="main_router", exchange_type="direct")
+                
+                # result = self._channel.queue_declare(queue="CH_SEND_MSG_Q")
+                # ch_send_msg_q = result.method.queue
+                # self._channel.queue_bind(queue=ch_send_msg_q, exchange="main_router", routing_key="CH_SEND_MSG")
+                
+                # result = self._channel.queue_declare(queue="CH_MSG_GETSTATE_Q")
+                # ch_msg_getstate_q = result.method.queue
+                # self._channel.queue_bind(queue=ch_msg_getstate_q, exchange="main_router", routing_key="CH_MSG_GETSTATE")
+                
+                # result = self._channel.queue_declare(queue="CH_RECV_MSG_Q")
+                # ch_recv_msg_q = result.method.queue
+                # self._channel.queue_bind(queue=ch_recv_msg_q, exchange="main_router", routing_key="CH_RECV_MSG")
+                
+                # result = self._channel.queue_declare(queue="OH_RECV_MSG_Q")
+                # oh_recv_msg_q = result.method.queue
+                # self._channel.queue_bind(queue=oh_recv_msg_q, exchange="main_router", routing_key="OH_RECV_MSG")
+                
+                # result = self._channel.queue_declare(queue="OH_DELIVER_MSG_Q")
+                # oh_deliver_msg_q = result.method.queue
+                # self._channel.queue_bind(queue=oh_deliver_msg_q, exchange="main_router", routing_key="OH_DELIVER_MSG")
+                
+                
+                # # Start consuming on these various queues
+                # self._channel.basic_qos(prefetch_count=1)
+                # self._channel.basic_consume(queue=ch_send_msg_q, on_message_callback=self.ch_send_msg_consumer, auto_ack=False)
+                # self._channel.basic_consume(queue=ch_msg_getstate_q, on_message_callback=self.ch_msg_getstate_consumer, auto_ack=False)
+                # self._channel.basic_consume(queue=ch_recv_msg_q, on_message_callback=self.ch_recv_msg_consumer, auto_ack=False)
+                # self._channel.basic_consume(queue=oh_recv_msg_q, on_message_callback=self.oh_recv_msg_consumer, auto_ack=False)
+                # self._channel.basic_consume(queue=oh_deliver_msg_q, on_message_callback=self.oh_deliver_msg_consumer, auto_ack=False)
+                
+                # self._consuming = True
+                
+                
+            # Don't recover if connection was closed by broker or a client
+            except pika.exceptions.ConnectionClosedByBroker:
+                self.stop()
+                break
+            except pika.exceptions.ConnectionClosedByClient:
+                self.stop()
+                break
+            # Don't recover on channel errors
+            except pika.exceptions.AMQPChannelError:
+                self.stop()
+                break
+            # Recover on all other connection errors
+            except pika.exceptions.AMQPConnectionError:
+                continue
+            except KeyboardInterrupt:
+                self.stop()
+                break
+        
+        
+        
         """
         # Set, bind, and set to listen ports.
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -479,6 +750,189 @@ class NSBServer(object):
         # finally:
         #     #self.sel.close()
         #     unregister_and_close(sock)
+        
+        """
+    
+    
+    def stop(self):
+        """
+        This function will handle closing the connection, closing the channel, clearing queues
+        """
+        slog.info(f"Stopping the server consumer")
+        self._stopping = True
+        self._consuming = False
+        if self._channel is not None:
+            slog.info(f"Closing channel on server consumer")
+            self._channel.close()
+        if self._connection is not None:
+            slog.info(f"Closing connection on server consumer")
+            # We want to close the connection because when the server is stopped, we don't want 
+            # clients still sending messages on a connection we aren't working with
+            self._connection.close()
+        
+    def ch_send_msg_consumer(self, ch, method, props, body):
+        
+        """
+        Per https://github.com/pika/pika/blob/main/examples/asynchronous_consumer_example.py#L300
+        Invoked by pika when a message is delivered from RabbitMQ. The
+        channel is passed for your convenience. The basic_deliver object that
+        is passed in carries the exchange, routing key, delivery tag and
+        a redelivered flag for the message. The properties passed in is an
+        instance of BasicProperties with the message properties and the body
+        is the message that was sent.
+        """
+        
+        """
+        CH_SEND_MSG: Application is requesting to send a message through the network.
+        """
+        
+        data = json.loads(body)
+        header = data["header"]
+        message = data["body"]
+        
+        # Because messages are sent as JSON, take the header and convert it into a Header object
+        header = self.objectifyHeader(header)
+        
+        # Take the message, look up the client, move it into their transmit queue, send an ack, return
+
+        # Check for the header type (redundant check, will only be here if routing key was CH_SEND_MSG)
+        if not header or not header.type:
+            slog.warning("Server received a 'CH_SEND_MSG' message from an AppClient with no attached header")
+            return
+        
+        # Find our client object from the header
+        client = self.clientLookup(header)
+        if not client:
+            # Raise error and print out header information
+            slog.error(f"Client not found.\nHeader information:\n{header}")
+            raise ClientNotFoundError(f"Client not found.\nHeader information:\n{header}")
+        
+        slog.info(f"CH_SEND_MSG received from {client.clientIp}/{client.nodeId}...")
+        
+        # Create a new message and store it.
+        (rc, msg) = client.createNewMessage(header, message)
+        
+        msgid = 0
+        if msg: msgid = msg.id
+        
+        # Start tracking the message.
+        if self.track_network_metrics:
+            self.tracker.addMessage(msgid, header.srcid, header.dstid, header.dataLen)
+            
+        # Send the client ID back to the server
+        ch.basic_publish(exchange="", routing_key=props.reply_to, properties=pika.BasicProperties(correlation_id=props.correlation_id),body=str(msgid))
+        ch.basic_ack(delivery_tag=props.delivery_tag)
+        
+        
+        
+    def ch_msg_getstate_consumer(self, ch, method, props, body):
+        
+        """
+        CH_MSG_GETSTATE: Application is requesting the state of a message.
+        """
+        
+        data = json.loads(body)
+        header = data["header"]
+        message = data["body"]
+        
+        # Because messages are sent as JSON, take the header and convert it into a Header object
+        header = self.objectifyHeader(header)
+        
+        # Take the message, look up the client, get the message state, send it back to the Client
+
+        # Check for the header type (redundant check, will only be here if routing key was CH_MSG_GETSTATE)
+        if not header or not header.type:
+            slog.warning("Server received a 'CH_MSG_GETSTATE' message from an AppClient with no attached header")
+            return
+        
+        # Find our client object from the header
+        client = self.clientLookup(header)
+        if not client:
+            # Raise error and print out header information
+            slog.error(f"Client not found.\nHeader information:\n{header}")
+            raise ClientNotFoundError(f"Client not found.\nHeader information:\n{header}")
+        
+        
+        slog.info(f"CH_MSG_GETSTATE received from {client.clientIp}/{client.nodeId}...")
+        
+        # Get the state of the message via the client
+        status = client.getMsgState(header.clientmsgid)
+        
+        # Send a reply back to client and ack the original appclient message
+        ch.basic_publish(exchange="", routing_key=props.reply_to, properties=pika.BasicProperties(correlation_id=props.correlation_id),body=status)
+        ch.basic_ack(delivery_tag=props.delivery_tag)
+        
+    def ch_recv_msg_consumer(self, ch, method, props, body):
+        
+        """
+        CH_RECV_MSG: Application is requesting to receive a message.
+        """
+        
+        data = json.loads(body)
+        header = data["header"]
+        
+        # Because messages are sent as JSON, take the header and convert it into a Header object
+        header = self.objectifyHeader(header)
+        
+        # Take the message, look up the client, move it into their transmit queue, send an ack, return
+
+        # Check for the header type (redundant check, will only be here if routing key was CH_RECV_MSG)
+        if not header or not header.type:
+            slog.warning("Server received a 'CH_RECV_MSG' message from an AppClient with no attached header")
+            return
+        
+        # Find our client object from the header
+        client = self.clientLookup(header)
+        if not client:
+            # Raise error and print out header information
+            slog.error(f"Client not found.\nHeader information:\n{header}")
+            raise ClientNotFoundError(f"Client not found.\nHeader information:\n{header}")
+        
+        
+        slog.info(f"CH_RECV_MSG received from {client.clientIp}/{client.nodeId}...")
+        
+        ####
+        message = client.getChRespMsg()
+        message = json.dumps(message)
+        
+        # Send a reply back to client and ack the original appclient message
+        ch.basic_publish(exchange="", routing_key=props.reply_to, properties=pika.BasicProperties(correlation_id=props.correlation_id),body=message)
+        ch.basic_ack(delivery_tag=props.delivery_tag)
+        
+    def oh_recv_msg_consumer(self, ch, method, props, body):
+        
+        """
+        OH_RECV_MSG: Simulator is requesting to pick up a message.
+        """
+        
+        print("Consuming sim client messages")
+        
+        # Send a reply back to client and ack the original sim client message
+        ch.basic_publish(exchange="", routing_key=props.reply_to, properties=pika.BasicProperties(correlation_id=props.correlation_id),body="Some body")
+        ch.basic_ack(delivery_tag=props.delivery_tag)
+        
+    def oh_deliver_msg_consumer(self, ch, method, props, body):
+        
+        """
+        OH_DELIVER_MSG: Simulator is notifying delivery of a message.
+        """
+        
+        print("Consuming sim client messages")
+        
+        # Take the message, find the appropriate client, move the message from that client's transceive queue to its receive queue, send an ack, return
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+    
+    # Messages sent as JSON, create and return a Header object from JSON
+    def objectifyHeader(self, header) -> Header: 
+        r = Header()
+        r.type = header["type"]
+        r.dataLen = header["dataLen"]
+        r.srcid = header["srcid"]
+        r.dstid = header["dstid"]
+        r.msgid = header["msgid"]
+        r.clientmsgid = header["clientmsgid"]
+        return r
+        
 
     """
     Functions to facilitate connections between multiple clients and the server. Based on a guide
