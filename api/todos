@@ -1,0 +1,9 @@
+1) Clean up async code
+1a) Check how threading with ioloop affects performance/function
+2) Implement push model for client getting messages
+3) Implement sim clients
+4) Modify/check AppClient to support multiple srcips/dstips using one appclient
+5) Remove old code
+6) Polish documentation
+7) Look into BlockingConnection instead of async callbacks? Blocking would require setup and declaration of queues, etc first before running code like send/recv
+8) ?? Make sure that server can receive message with either client-specific ID or server-assigned ID of message

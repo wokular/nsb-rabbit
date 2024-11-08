@@ -352,7 +352,7 @@ class NSBApplicationClient:
         A callback function to handle server replies to our initial ch_recv_msg message
         """
         # Put the message in the dictionary with the corresponding correlation id
-        clog.info(f"Client received message available from server: {body.decode()}")
+        clog.info(f"Client received message available from server: {props}")
         self._ch_recv_msg_messages_corr_ids[props.correlation_id] = body
         # ch.basic_ack(delivery_tag=method.delivery_tag)
     
@@ -374,6 +374,8 @@ class NSBApplicationClient:
         # 10.0.0.1 -> 167772161, etc
         srcip, = struct.unpack("!I", socket.inet_pton(socket.AF_INET, src_id))
         dstip, = struct.unpack("!I", socket.inet_pton(socket.AF_INET, dest_id))
+        
+        clog.info(f"msg id being sent: {msg_id}")
         
         # Create a JSON structure to hold our data in a message
         msg = {
@@ -611,7 +613,7 @@ async def test_sender(connector : NSBApplicationClient, aliases : list, auto=Fal
             await ainput("Press enter to continue...")
 
         # Send the message.
-        connector.send(src_id, dest_id, msg)
+        connector.send(src_id, dest_id, msg, str(random.randint(1, 100000)))
         clog.info(f"Message sent.")
         # If auto is True, wait for the rate.
         if auto:
@@ -664,8 +666,6 @@ async def main_manual(map_file_name, size_bounds):
     # Create a connector.
     connector = NSBApplicationClient()
     connector.start()
-    
-    time.sleep(2)
     # Gather the test sender and receiver.
     try:
         await asyncio.gather(
@@ -697,11 +697,14 @@ async def main_auto(map_file_name, rate, size_bounds):
     connector = NSBApplicationClient()
     connector.start()
     # Gather the test sender and receiver.
-    await asyncio.gather(
-        test_receiver(connector, aliases),
-        test_sender(connector, aliases, auto=True, rate=rate, size_bounds=size_bounds)
-    )
-    connector.stop()
+    time.sleep(2)
+    try: 
+        await asyncio.gather(
+            test_receiver(connector, aliases),
+            test_sender(connector, aliases, auto=True, rate=rate, size_bounds=size_bounds)
+        )
+    except: 
+        connector.stop()
     
     
 
