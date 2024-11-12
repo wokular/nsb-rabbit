@@ -518,7 +518,7 @@ class NSBApplicationClient:
                 "dataLen": len(message),
                 "srcid": srcip,
                 "dstid": None,
-                "msgid": None,
+                "msgid": msg_id,
                 "clientmsgid": msg_id
             },
             "body": json.dumps(message)

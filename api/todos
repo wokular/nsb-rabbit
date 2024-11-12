@@ -1,9 +1,10 @@
+0) Implement callback-based handling of ServerExchange responses in the AppClient (vs current blocking returns)
 1) Clean up async code
-1a) Check how threading with ioloop affects performance/function
+1a) ~~Check how threading with ioloop affects performance/function~~ Not wise as Pika is not threadsafe. Using async with callbacks might be best for performance.
 2) Implement push model for client getting messages
 3) Implement sim clients (use https://github.com/CopernicaMarketingSoftware/AMQP-CPP)
 4) Modify/check AppClient to support multiple srcips/dstips using one appclient
 5) Remove old code
 6) Polish documentation
 7) Look into BlockingConnection instead of async callbacks? Blocking would require setup and declaration of queues, etc first before running code like send/recv
-8) ?? Make sure that server can receive message with either client-specific ID or server-assigned ID of message
+8) ~~Change serverexchange to use client message ids~~

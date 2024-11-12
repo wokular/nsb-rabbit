@@ -48,7 +48,6 @@ class Header(object):
         self.srcid = None
         self.dstid = None
         self.msgid = None
-        self.clientmsgid = None
 
     def __str__(self):
         return "type %s dataLen %s srcid %s dstid %s msgid %s" % \
@@ -76,10 +75,8 @@ class Client(object):
         self.clientIp = clientIp
         self.nodeId = nodeId
         self.server = server
-        # Create a queue for each message state, including a message map (and a client msg id to server msg id map).
-        # dualmsgidmap maintains a mapping of client msg ids to assigned server ids
-        self.dualmsgidmap = dict()
-        self.msgmap = dict()
+        # Contain each client's messages sent (store the IDs) and the associated message
+        self.msg_id_map = dict()
         self.txq = list()
         self.transitq = list()
         self.rxq = list()
@@ -94,10 +91,10 @@ class Client(object):
             clog.debug(f"\tAdding message {msg.id} to TX queue...")
             # Check that message is new and does not exist in any queue or the map.
             assert(msg.q == None)
-            assert (msg.id not in self.msgmap)
+            assert (msg.id not in self.msg_id_map)
             assert (msg.id not in self.txq)
             # Add message to map and queue.
-            self.msgmap[msg.id] = msg
+            self.msg_id_map[msg.id] = msg
             self.txq.append(msg.id)
             clog.debug(f"\tMessage {msg.id} added.")
         elif dstq == nsbp.MSG_Q.MSGQ_TRANSIT:
@@ -105,7 +102,7 @@ class Client(object):
             clog.debug(f"\tAdding message {msg.id} to transit queue...")
             # Check that message is in the transmit queue, and not in transit.
             assert (msg.q == nsbp.MSG_Q.MSGQ_TX)
-            assert(msg.id in self.msgmap)
+            assert(msg.id in self.msg_id_map)
             assert (msg.id not in self.transitq)
             # Add to transit queue.
             self.transitq.append(msg.id)
@@ -114,7 +111,7 @@ class Client(object):
             # Receive queue.
             clog.debug(f"\tHandling message {msg.id} in RX queue...")
             # Check that message state is valid.
-            if msg.id in self.msgmap or \
+            if msg.id in self.msg_id_map or \
               msg.id in self.rxq:
                 clog.debug(f"\tMessage {msg.id} already delivered.")
                 return nsbp.ERROR_CODES.MESSAGE_ALREADY_DELIVERED
@@ -123,7 +120,7 @@ class Client(object):
                 clog.debug(f"\tMessage {msg.id} in wrong state.")
                 return nsbp.ERROR_CODES.MESSAGE_IN_WRONG_STATE
             # Add to receive queue.
-            self.msgmap[msg.id] = msg
+            self.msg_id_map[msg.id] = msg
             self.rxq.append(msg.id)
             clog.debug(f"\tMessage {msg.id} added to RX queue.")
         # Set message queue state.
@@ -134,22 +131,17 @@ class Client(object):
         """
         Returns the state of the message.
         """
-        # First get the server msgid from the client-provided msgid
-        print("client msg id: ", msgid)
-        if not msgid in self.dualmsgidmap: return None
-        msgid = self.dualmsgidmap[msgid]
-        print("server msg id: ", msgid)
         # Check if message exists.
-        if msgid not in self.msgmap:
+        if msgid not in self.msg_id_map:
             return nsbp.MSG_STATE.MSG_STATE_NOTFOUND
         # Check the message queue state.
-        if self.msgmap[msgid].q == nsbp.MSG_Q.MSGQ_TX:
+        if self.msg_id_map[msgid].q == nsbp.MSG_Q.MSGQ_TX:
             assert(msgid in self.txq)
             return nsbp.MSG_STATE.MSG_STATE_QUEUED
-        elif self.msgmap[msgid].q == nsbp.MSG_Q.MSGQ_TRANSIT:
+        elif self.msg_id_map[msgid].q == nsbp.MSG_Q.MSGQ_TRANSIT:
             assert(msgid in self.transitq)
             return nsbp.MSG_STATE.MSG_STATE_INTRANSIT
-        elif self.msgmap[msgid].q == nsbp.MSG_Q.MSGQ_RX:
+        elif self.msg_id_map[msgid].q == nsbp.MSG_Q.MSGQ_RX:
             assert(msgid in self.rxq)
             return nsbp.MSG_STATE.MSG_STATE_DELIVERED
         # Should never get here.
@@ -163,11 +155,8 @@ class Client(object):
         # Check that message is not to self.
         if (header.srcid == header.dstid):
             return (nsbp.ERROR_CODES.MESSAGE_TO_SELF, None)
-        # Create an ID for tracking the message, as well as the message
-        client_msg_id = header.clientmsgid
-        server_msg_id = str(get_msg_id())
-        msg = Msg(server_msg_id, header, pktData)
-        self.dualmsgidmap[client_msg_id] = server_msg_id
+        if not header.msgid: return (nsbp.ERROR_CODES.NO_PROVIDED_MSGID, msg)
+        msg = Msg(header.msgid, header, pktData)
         # Add to transmit queue.
         self.add2q(msg, nsbp.MSG_Q.MSGQ_TX)
         # Log.
@@ -233,13 +222,13 @@ class Client(object):
             clog.info(f"\tMessage found. Forwarding to app at {self.rxq[0]}...")
             # If there are messages, send the first one (packed).
             msgid = self.rxq.pop(0)
-            msg = self.msgmap[msgid]
+            msg = self.msg_id_map[msgid]
             fmt = "%s%ss" % (nsbp.CH_HEADER_FORMAT, len(msg.data))
             # if DEBUG: print ("FORMAT %s" % fmt)
             retbuf = struct.pack(fmt, nsbp.MSG_TYPES.CH_RESP_MSG,
                 len(msg.data), msg.header.srcid, msg.header.dstid, msg.data)
             # Remove message from message map.
-            self.msgmap.pop(msgid)
+            self.msg_id_map.pop(msgid)
             clog.info(f"\tMessage {msgid} retrieved and removed from message map.")
         clog.debug(f"\tResponse buffer length: {len(retbuf)}")
         sock.sendall(retbuf)
@@ -262,12 +251,12 @@ class Client(object):
             msgid = self.rxq.pop(0)
                 
         
-            msg = self.msgmap[msgid]
+            msg = self.msg_id_map[msgid]
             # if DEBUG: print ("FORMAT %s" % fmt)
             retbuf = struct.pack(fmt, nsbp.MSG_TYPES.CH_RESP_MSG,
                 len(msg.data), msg.header.srcid, msg.header.dstid, msg.data)
             # Remove message from message map.
-            self.msgmap.pop(msgid)
+            self.msg_id_map.pop(msgid)
             
             # For returning the message's associated clientid
             temp = None
@@ -311,7 +300,7 @@ class Client(object):
             # If there are outgoing messages, send the first one (packed).
             clog.info(f"\tMessage found. Sending...")
             msgid = self.txq.pop(0)
-            msg = self.msgmap[msgid]
+            msg = self.msg_id_map[msgid]
             fmt = "%s%ss" % (nsbp.OH_HEADER_FORMAT, len(msg.data))
             # if DEBUG: print ("FORMAT %s" % fmt)
             # Set the destination client using the reference.
@@ -331,14 +320,14 @@ class Client(object):
         """
         clog.info(f"Handling message delivery in queues...")
         # Check if message is in sender's transit queue and message map.
-        if header.msgid not in srcClient.msgmap:
+        if header.msgid not in srcClient.msg_id_map:
             return nsbp.ERROR_CODES.MESSAGE_NOT_FOUND
         if header.msgid not in srcClient.transitq:
             return nsbp.ERROR_CODES.MESSAGE_IN_WRONG_QUEUE
         # Remove message from sender's transit queue and message map.
         index = srcClient.transitq.index(header.msgid)
         msgid = srcClient.transitq.pop(index)
-        msg = srcClient.msgmap.pop(msgid)
+        msg = srcClient.msg_id_map.pop(msgid)
         # Add message to receiver's received queue and message map.
         rc = self.add2q(msg, nsbp.MSG_Q.MSGQ_RX)
         # Return result code.
@@ -814,7 +803,7 @@ class NSBServer(object):
         # if self.track_network_metrics:
         #     self.tracker.addMessage(msgid, header.srcid, header.dstid, header.dataLen)
             
-        # Send the client ID back to the server
+        # Send the client ID back to the AppClient client
         ch.basic_publish(exchange="", routing_key=props.reply_to, properties=pika.BasicProperties(correlation_id=props.correlation_id),body=str(msgid))
         
         
