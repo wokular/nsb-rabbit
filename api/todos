@@ -1,7 +1,7 @@
 1) Clean up async code
 1a) Check how threading with ioloop affects performance/function
 2) Implement push model for client getting messages
-3) Implement sim clients
+3) Implement sim clients (use https://github.com/CopernicaMarketingSoftware/AMQP-CPP)
 4) Modify/check AppClient to support multiple srcips/dstips using one appclient
 5) Remove old code
 6) Polish documentation

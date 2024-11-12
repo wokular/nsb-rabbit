@@ -515,3 +515,5 @@ application client or the
 
 #endif
 }
+
+// Use G++ to compile
