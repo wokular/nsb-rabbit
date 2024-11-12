@@ -384,8 +384,7 @@ class NSBApplicationClient:
                 "dataLen": len(message),
                 "srcid": srcip,
                 "dstid": dstip,
-                "msgid": None,
-                "clientmsgid": msg_id
+                "msgid": msg_id,
             },
             "body": json.dumps(message)
         }
@@ -422,8 +421,7 @@ class NSBApplicationClient:
                 "dataLen": len(message),
                 "srcid": srcip,
                 "dstid": srcip,
-                "msgid": None,
-                "clientmsgid": msgid
+                "msgid": None
             },
             "body": json.dumps(message)
         }
@@ -458,43 +456,6 @@ class NSBApplicationClient:
         del self._ch_recv_msg_messages_corr_ids[corr_id]
         return temp
         
-        """
-        # Send the message.
-        self.sock.send(header)
-        rlog.debug(f"\tSent request to server...")
-        # Listen for message, but just read the header.
-        reply = self.sock.recv(nsbp.CH_HEADER_SIZE)
-        rlog.debug(f"\tServer reply: {reply}")
-        # Unpack the reply.
-        _reply = reply[:nsbp.CH_HEADER_SIZE]
-        msg_type, msg_len, src_id, dest_id = struct.unpack(nsbp.CH_HEADER_FORMAT, _reply)
-        # Display the values.
-        rlog.debug(f"\t\tMessage Type: {msg_type}")
-        rlog.debug(f"\t\tMessage Length: {msg_len}")
-        rlog.debug(f"\t\tSource ID: {src_id}")
-        rlog.debug(f"\t\tDestination ID: {dest_id}")
-        # Check for CH_RESP_MSG.
-        if msg_type == nsbp.MSG_TYPES.CH_RESP_MSG:
-            rlog.debug(f"\tServer sent CH_RESP_MSG.")
-            if msg_len > 0:
-                # Read the rest of the message.
-                msg = self.sock.recv(msg_len)
-                rlog.info(f"\tMessage received. Actual length: {len(msg)} / Expected length: {msg_len}")
-                # Log source, destination, and message.
-                src_addr = int_to_ip(src_id)
-                dest_addr = int_to_ip(dest_id)
-                rlog.info(f"\t\tSource: {src_addr}")
-                rlog.info(f"\t\tDestination: {dest_addr}")
-                rlog.info(f"\t\tMessage: {msg}")
-                # Return the source, destination, and message.
-                return src_addr, dest_addr, msg
-            else:
-                rlog.debug("No message received.")
-        else:
-            rlog.error(f"Message not received successfully from the server. Unexpected response.")
-        return None
-        """
-        
     
     def getMessageState(self, client_ip, msg_id):
         """
@@ -518,8 +479,7 @@ class NSBApplicationClient:
                 "dataLen": len(message),
                 "srcid": srcip,
                 "dstid": None,
-                "msgid": msg_id,
-                "clientmsgid": msg_id
+                "msgid": msg_id
             },
             "body": json.dumps(message)
         }

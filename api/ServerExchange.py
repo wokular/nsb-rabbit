@@ -257,15 +257,6 @@ class Client(object):
                 len(msg.data), msg.header.srcid, msg.header.dstid, msg.data)
             # Remove message from message map.
             self.msg_id_map.pop(msgid)
-            
-            # For returning the message's associated clientid
-            temp = None
-            # Remove the clientmsgid/servermsgid mapping for this message
-            for clientmsgid, servermsgid in self.dualmsgidmap.items():
-                if servermsgid == msgid:
-                    temp = clientmsgid
-                    del self.dualmsgidmap[clientmsgid]
-                    break
                 
             returnMsg = {
                 "header": {
@@ -273,8 +264,7 @@ class Client(object):
                     "dataLen": len(msg.data),
                     "srcid": msg.header.srcid,
                     "dstid": msg.header.dstid,
-                    "msgid": msg.header.msgid,
-                    "clientmsgid": temp
+                    "msgid": msg.header.msgid
                 },
                 "body": json.dumps(msg.data)
             }
@@ -839,9 +829,9 @@ class NSBServer(object):
         slog.info(f"CH_MSG_GETSTATE received from {client.clientIp}/{client.nodeId}...")
         
         # Get the state of the message via the client
-        status = str(client.getMsgState(header.clientmsgid))
+        status = str(client.getMsgState(header.msgid))
         if status == None:
-            slog.warning(f"Client-provided msg id {header.clientmsgid} not found as valid mapping.")
+            slog.warning(f"msg id {header.msg} not found as valid mapping.")
         
         slog.info(f"Status: {status}")
         
@@ -885,8 +875,7 @@ class NSBServer(object):
                 "dataLen": 5,
                 "srcid": header.srcid,
                 "dstid": header.dstid,
-                "msgid": header.msgid,
-                "clientmsgid": header.clientmsgid
+                "msgid": header.msgid
             },
             "body": "hello"
         }
@@ -926,7 +915,6 @@ class NSBServer(object):
         r.srcid = header["srcid"]
         r.dstid = header["dstid"]
         r.msgid = header["msgid"]
-        r.clientmsgid = header["clientmsgid"]
         return r
         
 
