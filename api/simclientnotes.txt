@@ -1,0 +1,10 @@
+Notes for the sim client
+
+- worry about message state stuff later
+- NodeClient vs AppClient
+- Work on a node client where several AppClient (becoming NodeClient) objects are split up and independent.
+They send to one TX (sim consumes from it) queue where the messages are pulled off, sent through sim, and goes to producer callback.
+Producer callback sends to exchange which routes to the correct queue (each node client gets its own RX queue and consumes from it).
+Node client consumes message and then receive() calls the callback passed in by NodeClient during the init
+
+- Look into connections vs channels in terms of multiple unique nodeclients
