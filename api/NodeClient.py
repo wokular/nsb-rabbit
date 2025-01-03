@@ -16,13 +16,12 @@ import threading
 import pika
 import pika.exceptions
 
-# Set up logging for server. // logging .INFO by default
 logging.basicConfig(level=logging.FATAL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',)
+# Create a client logger
 clog = logging.getLogger(f"(client)")
-# Set clog level to INFO
 clog.setLevel(level=logging.INFO)
+# Create a rabbit logger
 rlog = logging.getLogger(f"(rabbit client)")
-# Set rlog level to INFO.
 rlog.setLevel(logging.INFO)
 
 # NSB_SERVER_ADDR = "host.docker.internal"
@@ -86,18 +85,7 @@ class RabbitManager:
         self._rxq_tag = None
         self._txq = "global_txq" # Any node client or sim client can create the txq 
         
-        
-        
-    def setup(self):
-        pass
-    
-    def start_ioloop(self):
-        try:
-            self._connection.ioloop.start()
-        except KeyboardInterrupt:
-            rlog.info(f"Stopping Rabbit IOLoop on node ID {self.node_id}")
-            self._connection.ioloop.stop()
-            self._stopping = True
+
         
     def start(self):
         rlog.info(f"Starting RabbitMQ for node ID {self.node_id}")
@@ -127,22 +115,42 @@ class RabbitManager:
                 self._connection.ioloop.stop()
         
     def stop(self):
+        """Gracefully stop the RabbitMQ connection."""
         rlog.info(f"Stopping node ID {self.node_id}")
+        
         if not self._stopping:
             self._stopping = True
-        if self._channel is not None:
-            
-            cb = functools.partial(self.on_cancelok, queue_name=self._ch_send_msg_q)
-            self._channel.basic_cancel(self._ch_send_msg_q_tag, cb)
-            
-            clog.info(f"Closing channel on client with ID: {self.clientId}")
-            self._channel.close()
-            
-        if self._connection is not None and self._stopping and not self._closing_connection:
-            clog.info(f"Closing connection {self._stopping}")
-            self._closing_connection = True
-            # For some reasaon, it already has closed so calling .close() here triggers an error
-            self._connection.close()
+
+        # Close the channel if it's open and prevent double closing
+        if self._channel:
+            if self._channel.is_open:
+                try:
+                    cb = functools.partial(self.on_cancelok, queue_name=self._txq)
+                    self._channel.basic_cancel(self._txq, cb)
+                except pika.exceptions.ChannelWrongStateError:
+                    rlog.warning("Channel already closing, skipping cancel.")
+                finally:
+                    rlog.info(f"Closing channel on node ID: {self.node_id}")
+                    self._channel.close()
+            else:
+                rlog.warning(f"Channel already closed for node ID {self.node_id}")
+
+        # Close the connection if it's still open
+        if self._connection:
+            if self._connection.is_open:
+                rlog.info("Closing the RabbitMQ connection.")
+                self._closing_connection = True
+                try:
+                    self._connection.close()
+                    self._connection.ioloop.stop()
+                except pika.exceptions.ConnectionWrongStateError:
+                    rlog.warning("Connection already in the process of closing.")
+            elif self._connection.is_closing:
+                rlog.warning("Connection already closing, waiting for shutdown.")
+            else:
+                rlog.warning("Connection already closed.")
+        else:
+            rlog.warning("No active RabbitMQ connection to close.")
             
     def on_connection_open(self, connection_obj):
         rlog.info(f"Connection was established for node ID {self.node_id}")
@@ -272,9 +280,11 @@ class RabbitManager:
         Publish a message to the global TX queue via the exchange.
         """
         rlog.info(f"Publishing message to global TX queue {self._txq}")
+        
         self._channel.basic_publish(exchange=self._MAINEXCHANGE, routing_key=self._txq, body=message)
 
 class NodeClient:
+    
     def __init__(self, node_id, node_name, receive_callback=None):
         
         clog.info(f"Initializing NSB node (ID {node_id}, Name {node_name})")
@@ -282,32 +292,36 @@ class NodeClient:
         self.node_id = node_id
         self.node_name = node_name
         self._message_queue = []
-        self._receive_callback = receive_callback or self.__default_receive
+        self._receive_callback = receive_callback or self.__default_receive_callback
         
         self._rabbit_manager = RabbitManager(self.node_id, self.node_name, self.__receive)
         
-        
+    def start(self):
+        self._rabbit_manager.start()
             
     # The internal receive for a NodeClient instance, users should NOT call this
     # The Rabbit rx consumer will call this method
     def __receive(self, channel, method, props, body):
         # Either store message in self._message_queue or call the user's provided callback
         try:
-            if self._receive_callback is self.__default_receive:
-                self.__default_receive(body)
+            if self._receive_callback is self.__default_receive_callback:
+                self.__default_receive_callback(body)
             else:
                 self._receive_callback(body)
         except Exception as e:
             clog.error(f"Error in user-provided callback: {e}")
             clog.debug("Message causing error: %s", body)
             
-    def __default_receive(self, message):
+    def __default_receive_callback(self, message):
         """
         Default method for handling received messages.
         """
         self._message_queue.append(message)
         
     def receive(self):
+        """
+        Default receive method that user client can call to return received messages
+        """
         if self._message_queue:
             return self._message_queue.pop(0)
         else:
@@ -317,43 +331,125 @@ class NodeClient:
         
     def __del__(self):
         """
-        Close the connection to the server.
+        Close the connection to the rabbit daemon.
         """
         self.stop()
         
             
     # This function won't stop the main connection the server is running for the brokers,
-    # it only stops this client's channel connection to the server
+    # it only stops this client's channel connection to the rabbit daemon
     def stop(self):
         
         self._rabbit_manager.stop()
             
         
-    def send(self, dest_id, message, msg_id=None):
+    def send(self, dest_id, message):
         """
-        Send a message to the server. 
+        Send a message to the sim client. 
         An application using this as a client library can pass in an ID for the message being sent,
         and that message's state can be tracked using the same ID. If no ID is provided, the server will 
         automatically assign a client ID to the message, which will be available in self.sent_msg_ids as a mapping between the assigned ID and message
         """
-        
-        clog.info("Client attempting to send a message.")
-        
-        # Convert string IPV4 addrs to int representation (for server lookup purposes) 
-        # 10.0.0.1 -> 167772161, etc
-        srcip, = struct.unpack("!I", socket.inet_pton(socket.AF_INET, self.node_id))
-        dstip, = struct.unpack("!I", socket.inet_pton(socket.AF_INET, dest_id))
-        
-        clog.info(f"msg id being sent: {msg_id}")
-        
+
         # Create a JSON structure to hold our data in a message
         msg = {
             "header": {
                 "type": nsbp.MSG_TYPES.CH_SEND_MSG,
                 "dataLen": len(message),
-                "srcid": srcip,
-                "dstid": dstip,
-                "msgid": msg_id,
+                "srcid": self.node_id,
+                "dstid": dest_id, 
+            },
+            "body": json.dumps(message)
+        }
+        # Stringify message from json
+        msg_str = json.dumps(msg)
+        
+        # Send the message
+        self._rabbit_manager.send(msg_str)
+        
+        
+"""
+Because we want to support one NodeClient interface with multiple user client connections (aka sending/receiving from multiple nodes/IPs),
+we need to make a special class that supports dynamic source node IPs/names, that can also receive from multiple nodes and appropriately multiplex the 
+single shared rabbit receiver queue.
+
+self.node_id_list = []
+send()
+
+"""
+class SharedNodeClient:
+    
+    def __init__(self, node_id, node_name, receive_callback=None):
+        
+        clog.info(f"Initializing NSB node (ID {node_id}, Name {node_name})")
+        
+        self.node_id = node_id
+        self.node_name = node_name
+        self._message_queue = []
+        self._receive_callback = receive_callback or self.__default_receive_callback
+        
+        self._rabbit_manager = RabbitManager(self.node_id, self.node_name, self.__receive)
+        
+            
+    # The internal receive for a NodeClient instance, users should NOT call this
+    # The Rabbit rx consumer will call this method
+    def __receive(self, channel, method, props, body):
+        # Either store message in self._message_queue or call the user's provided callback
+        try:
+            if self._receive_callback is self.__default_receive_callback:
+                self.__default_receive_callback(body)
+            else:
+                self._receive_callback(body)
+        except Exception as e:
+            clog.error(f"Error in user-provided callback: {e}")
+            clog.debug("Message causing error: %s", body)
+            
+    def __default_receive_callback(self, message):
+        """
+        Default method for handling received messages.
+        """
+        self._message_queue.append(message)
+        
+    def receive(self):
+        """
+        Default receive method that user client can call to return received messages
+        """
+        if self._message_queue:
+            return self._message_queue.pop(0)
+        else:
+            clog.warning("Cannot return message from empty queue")
+            return
+        
+        
+    def __del__(self):
+        """
+        Close the connection to the rabbit daemon.
+        """
+        self.stop()
+        
+            
+    # This function won't stop the main connection the server is running for the brokers,
+    # it only stops this client's channel connection to the rabbit daemon
+    def stop(self):
+        
+        self._rabbit_manager.stop()
+            
+        
+    def send(self, dest_id, message):
+        """
+        Send a message to the sim client. 
+        An application using this as a client library can pass in an ID for the message being sent,
+        and that message's state can be tracked using the same ID. If no ID is provided, the server will 
+        automatically assign a client ID to the message, which will be available in self.sent_msg_ids as a mapping between the assigned ID and message
+        """
+
+        # Create a JSON structure to hold our data in a message
+        msg = {
+            "header": {
+                "type": nsbp.MSG_TYPES.CH_SEND_MSG,
+                "dataLen": len(message),
+                "srcid": self.node_id,
+                "dstid": dest_id
             },
             "body": json.dumps(message)
         }
@@ -365,70 +461,63 @@ class NodeClient:
         
         
 
-async def test_sender(connector : NSBApplicationClient, aliases : list, auto=False, rate=None, size_bounds=[10, 100]):
-    clog.info("Startign test sender..")
+async def test_sender( aliases : list, auto=False, rate=None, size_bounds=[10, 100]):
+    clog.info("Starting test sender..")
+    
+    # Copy list of aliases to a new list.
+    this_aliases = aliases.copy()
+    
+    # Create a dictionary of NodeClients 
+    node_clients = {}
+    for alias in this_aliases:
+        node_clients[alias] = NodeClient(alias, f"{alias}_node")
+        node_clients[alias].start()
+    
+    
     while True:
+        
         # Ensure that if auto is on, rate is not None.
         if auto and rate is None:
             clog.error(f"Auto is on, but rate is None.")
             raise ValueError(f"Auto is on, but rate is None.")
+            exit(1)
+            
         # Copy list of aliases to a new list.
         this_aliases = aliases.copy()
-        # Prompt for the source address.
-        src_id = await ainput("Source ID: ") if not auto else ""
-        # If the source ID is blank, choose a random address from aliases.
-        if src_id == "":
-            src_id = random.choice(this_aliases)
-        # If the source ID is not blank, check if it is in the aliases.
-        elif src_id not in this_aliases:
-            clog.error(f"Source ID not in aliases.")
-            raise KeyError(f"Source ID not in aliases.")
-        else:
-            # Display the IP address for the source ID.
-            clog.info(f"\t> {src_id}")
-        # Remove the source ID from the list of aliases.
-        this_aliases.remove(src_id)
-        # Prompt for destination address.
-        dest_id = await ainput("Destination ID: ") if not auto else ""
-        # If the destination ID is blank, choose a random address from aliases.
-        if dest_id == "":
-            dest_id = random.choice(this_aliases)
-        # If the destination ID is not blank, check if it is in the aliases.
-        elif dest_id not in this_aliases:
-            clog.error(f"Destination ID not in aliases.")
-            raise KeyError(f"Destination ID not in aliases.")
-        else:
-            # Display the IP address for the destination ID.
-            clog.info(f"\t> {dest_id}")
-        # Prompt for message.
-        msg = await ainput("Message: ") if not auto else ""
-        # If the message is blank, use a random byte string of random length between 1 and 100.
-        if msg == "":
-            msg = f"Automatic Message time {str(time.time())}"
-            #msg = os.urandom(9) #for testing purpose 
-            #msg = os.urandom(random.randint(10, 100))
-        # else:
-            # msg = msg.encode()
-        # Print the message.
-        clog.debug(f"\t> {msg}")
+        
+        for alias in this_aliases:
+            
+            src_id = alias
+            
+            # Prompt for destination address.
+            dest_id = await ainput("Destination ID: ") if not auto else ""
+            # If the destination ID is blank, choose a random address from aliases.
+            while dest_id == "" or dest_id == src_id:
+                dest_id = random.choice(this_aliases)
+                
+            # Prompt for message.
+            msg = await ainput("Message: ") if not auto else f"{src_id} is sending a message to {dest_id} at {str(time.time())}"
 
-        # Print source, destination and message.
-        clog.info(f"Source: {src_id}")
-        clog.info(f"Destination: {dest_id}")
-        clog.info(f"Message: {msg}")
+            # Print source, destination and message.
+            clog.info(f"Source: {src_id}")
+            clog.info(f"Destination: {dest_id}")
+            clog.info(f"Message: {msg}")
 
-        # Press enter to continue.
-        if not auto:
-            await ainput("Press enter to continue...")
+            # Press enter to continue.
+            if not auto:
+                await ainput("Press enter to continue...")
 
-        # Send the message.
-        connector.send(src_id, dest_id, msg, str(random.randint(1, 100000)))
-        clog.info(f"Message sent.")
+            # Send the message.
+            connector = node_clients[alias]
+            connector.send(dest_id, msg)
+            clog.info(f"Message sent.")
+            
+            
         # If auto is True, wait for the rate.
         if auto:
             await asyncio.sleep(1/float(rate))
 
-async def test_receiver(connector : NSBApplicationClient, aliases : list, polling_delay=1):
+async def test_receiver(connector : NodeClient, aliases : list, polling_delay=1):
     """
     This test receiver will cycle through the aliases and receive messages.
     """
@@ -473,7 +562,7 @@ async def main_manual(map_file_name, size_bounds):
         clog.info(f"\t> {alias}")
 
     # Create a connector.
-    connector = NSBApplicationClient()
+    connector = NodeClient("10.0.0.1", "Node 1")
     connector.start()
     # Gather the test sender and receiver.
     try:
@@ -502,18 +591,14 @@ async def main_auto(map_file_name, rate, size_bounds):
     for alias in aliases:
         clog.info(f"\t> {alias}")
 
-    # Create a connector.
-    connector = NSBApplicationClient()
-    connector.start()
     # Gather the test sender and receiver.
     time.sleep(2)
     try: 
         await asyncio.gather(
-            test_receiver(connector, aliases),
-            test_sender(connector, aliases, auto=True, rate=rate, size_bounds=size_bounds)
+            test_sender(aliases, auto=True, rate=rate, size_bounds=size_bounds)
         )
-    except: 
-        connector.stop()
+    except Exception as e:
+        clog.error(f"Error occurred in gather of test_sender: {e}")
     
     
 
