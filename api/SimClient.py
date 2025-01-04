@@ -226,7 +226,7 @@ class SimClient:
         data = json.loads(body)
         header = data["header"]
         body = data["body"]
-        slog.info(header['srcid'], header['dstid'])
+        slog.info(f"Received message from {header['srcid']} to {header['dstid']}")
         
         self.send(header['srcid'], header['dstid'], body)
         

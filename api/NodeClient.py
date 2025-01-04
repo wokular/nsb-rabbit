@@ -15,6 +15,8 @@ import threading
 # Rabbit/Pika
 import pika
 import pika.exceptions
+import pika.adapters.asyncio_connection
+import asyncio
 
 logging.basicConfig(level=logging.FATAL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',)
 # Create a client logger
@@ -61,227 +63,194 @@ Initialization:
 - Create consumer for `{self.node_id}_rx` queue (`__receive`)
 -- Use callback receive if provided, otherwise store messages which can later be read via `receive()`
 
-TODO: Check if multiple NodeClient's create multiple connections or channels in Rabbit
-
+Note: NodeClients create multiple connections in Rabbit
 
 """
 
 # The class responsible for managing Rabbit-related stuff
-class RabbitManager:
+class AsyncioRabbitManager:
     def __init__(self, node_id, node_name, callback):
-        
         self.node_id = node_id
         self.node_name = node_name
-        
+        self._callback = callback
+
         self._connection = None
         self._channel = None
-        self._rabbiturl = RABBIT_URL
-        self._stopping = False
-        self._closing_connection = False
         self._MAINEXCHANGE = "main_router"
-        self._callback = callback
-        
-        self._rxq = None
-        self._rxq_tag = None
-        self._txq = "global_txq" # Any node client or sim client can create the txq 
-        
+        self._txq = "global_txq"
 
-        
-    def start(self):
-        rlog.info(f"Starting RabbitMQ for node ID {self.node_id}")
+        self._pending_messages = []
         self._stopping = False
-        self._closing_connection = False
 
-        try:
-            while not self._stopping:
-                try:
-                    rlog.info("Attempting to establish connection...")
-                    self._connection = pika.SelectConnection(
-                        pika.URLParameters(self._rabbiturl),
-                        on_open_callback=self.on_connection_open,
-                        on_open_error_callback=self.on_connection_open_error,
-                        on_close_callback=self.on_connection_closed
-                    )
-                    rlog.info("Node client entering Rabbit IOLoop.")
-                    self._connection.ioloop.start()
-                except KeyboardInterrupt:
-                    rlog.warning("KeyboardInterrupt detected, stopping RabbitManager.")
-                    self.stop()
-                    break
-                except pika.exceptions.AMQPConnectionError as e:
-                    rlog.warning(f"AMQPConnectionError: {e}. Retrying...")
-        finally:
-            if self._connection and not self._connection.is_closed:
-                self._connection.ioloop.stop()
-        
+    async def start(self):
+        """
+        Non-blocking start using AsyncioConnection. Do NOT call run_forever().
+        Just create the connection. The existing asyncio event loop will process it.
+        """
+        rlog.info(f"Starting RabbitMQ with AsyncioConnection for node {self.node_id}")
+        self._stopping = False
+
+        self._connection = pika.adapters.asyncio_connection.AsyncioConnection(
+            parameters=pika.URLParameters(RABBIT_URL),
+            on_open_callback=self.on_connection_open,
+            on_open_error_callback=self.on_connection_open_error,
+            on_close_callback=self.on_connection_closed
+        )
+        # At this point, the connection is created. The callbacks will handle the rest.
+        # We do NOT block here. The asyncio loop (already running) drives the connection.
+
     def stop(self):
-        """Gracefully stop the RabbitMQ connection."""
-        rlog.info(f"Stopping node ID {self.node_id}")
-        
-        if not self._stopping:
-            self._stopping = True
-
-        # Close the channel if it's open and prevent double closing
-        if self._channel:
-            if self._channel.is_open:
-                try:
-                    cb = functools.partial(self.on_cancelok, queue_name=self._txq)
-                    self._channel.basic_cancel(self._txq, cb)
-                except pika.exceptions.ChannelWrongStateError:
-                    rlog.warning("Channel already closing, skipping cancel.")
-                finally:
-                    rlog.info(f"Closing channel on node ID: {self.node_id}")
-                    self._channel.close()
-            else:
-                rlog.warning(f"Channel already closed for node ID {self.node_id}")
-
-        # Close the connection if it's still open
-        if self._connection:
-            if self._connection.is_open:
-                rlog.info("Closing the RabbitMQ connection.")
-                self._closing_connection = True
-                try:
-                    self._connection.close()
-                    self._connection.ioloop.stop()
-                except pika.exceptions.ConnectionWrongStateError:
-                    rlog.warning("Connection already in the process of closing.")
-            elif self._connection.is_closing:
-                rlog.warning("Connection already closing, waiting for shutdown.")
-            else:
-                rlog.warning("Connection already closed.")
-        else:
-            rlog.warning("No active RabbitMQ connection to close.")
-            
-    def on_connection_open(self, connection_obj):
-        rlog.info(f"Connection was established for node ID {self.node_id}")
-        self.open_channel()
-        
-    def on_connection_open_error(self,  _unused_connection, err):
-        rlog.error(f"Node ID {self.node_id} failed while opening connection: ", err)
-        
-    def on_connection_closed(self, _unused_connection, reason):
         """
-        This method is invoked by pika when the connection to RabbitMQ is
-        closed unexpectedly. Since it is unexpected, we will reconnect to
-        RabbitMQ if it disconnects.
+        Gracefully stop the connection/channel without blocking the asyncio loop.
         """
-        rlog.warning(f"Node ID {self.node_id}'s connection closed unexpectedly: {reason}")
         if self._stopping:
-            self.stop()
-            
+            rlog.info("Stop called again; already stopping.")
+            return
+
+        rlog.info(f"Stopping RabbitManager for node {self.node_id}")
+        self._stopping = True
+
+        # Close the channel if open
+        if self._channel and self._channel.is_open:
+            try:
+                self._channel.close()
+            except pika.exceptions.ChannelWrongStateError:
+                rlog.warning("Channel already closing or closed.")
+
+        # Close the connection if open
+        if self._connection and self._connection.is_open:
+            try:
+                self._connection.close()
+            except pika.exceptions.ConnectionWrongStateError:
+                rlog.warning("Connection already closing.")
+        else:
+            rlog.warning("Connection already closed or never opened.")
         
-    def open_channel(self):
-        # Create our channel to handle all messaging
+    # --------------------------
+    # Connection / Channel Callbacks
+    # --------------------------
+
+    def on_connection_open(self, connection):
+        rlog.info(f"[{self.node_id}] Connection open, creating channel.")
         self._connection.channel(on_open_callback=self.on_channel_open)
-    
-    def on_channel_open(self, channel):
-        rlog.info(f"Node ID {self.node_id}'s channel was successfully opened")
-        # Store the channel object in self._channel
-        self._channel = channel
-        # Add a channel closed callback to the channel
-        self._channel.add_on_close_callback(self.on_channel_closed)
-        # Set up the main exchange with some name
-        self.setup_exchange()
-        
-    def on_channel_closed(self, channel, reason):
-        """
-        Invoked by pika when RabbitMQ unexpectedly closes the channel.
-        """
-        rlog.warning(f"Node ID {self.node_id}'s channel {channel} was closed unexpectedly: {reason}")
+
+    def on_connection_open_error(self, _unused_connection, err):
+        rlog.error(f"Connection error for node {self.node_id}: {err}")
+        # If desired, you can retry or simply stop
+        self.stop()
+
+    def on_connection_closed(self, _unused_connection, reason):
+        if self._stopping:
+            rlog.info(f"[{self.node_id}] Connection closed (stopping): {reason}")
+        else:
+            rlog.warning(f"[{self.node_id}] Connection closed unexpectedly: {reason}")
         self._channel = None
-         
+
+    def on_channel_open(self, channel):
+        rlog.info(f"[{self.node_id}] Channel opened successfully.")
+        self._channel = channel
+        self._channel.add_on_close_callback(self.on_channel_closed)
+        self.setup_exchange()
+
+    def on_channel_closed(self, ch, reason):
+        rlog.warning(f"[{self.node_id}] Channel closed: {reason}")
+        self._channel = None
+        if not self._stopping and self._connection.is_open:
+            rlog.info("Closing the connection because the channel closed unexpectedly.")
+            self._connection.close()
+
+    # --------------------------
+    # Setup Exchange / Queues
+    # --------------------------
+
     def setup_exchange(self):
-        rlog.info(f"Setting up exchange {self._MAINEXCHANGE} if not already set up")
+        rlog.info(f"[{self.node_id}] Declaring exchange: {self._MAINEXCHANGE}.")
         cb = functools.partial(self.on_exchange_declareok, exchange_name=self._MAINEXCHANGE)
-        self._channel.exchange_declare(exchange=self._MAINEXCHANGE, exchange_type="direct", callback=cb)
-        
-    # When the exchange was correctly declared (or already exists)
+        self._channel.exchange_declare(
+            exchange=self._MAINEXCHANGE,
+            exchange_type="direct",
+            callback=cb
+        )
+
     def on_exchange_declareok(self, _unused_frame, exchange_name):
-        """
-        Invoked by pika when RabbitMQ has finished the Exchange.Declare RPC
-        command. 
-        """
-        rlog.info(f"Exchange declared: {exchange_name}")
-        self.setup_global_txq()  # Set up the global TX queue
-        self.setup_rx_queue()    # Set up RX queue specific to this node
+        rlog.info(f"[{self.node_id}] Exchange declared: {exchange_name}")
+        self.setup_global_txq()
+        self.setup_rx_queue()
 
     def setup_global_txq(self):
-        """
-        Declares the global TX queue and binds it to the exchange.
-        """
-        rlog.info(f"Setting up global TX queue: {self._txq}")
+        rlog.info(f"[{self.node_id}] Setting up global TX queue {self._txq}")
         cb = functools.partial(self.on_queue_declareok, queue_name=self._txq)
         self._channel.queue_declare(queue=self._txq, exclusive=False, callback=cb)
 
     def setup_rx_queue(self):
-        """
-        Declares the RX queue for the specific node and starts consuming from it.
-        """
-        rlog.info(f"Node ID {self.node_id} is setting up RX queue: {self.node_id}_rxq")
-        rx_cb = functools.partial(self.on_queue_declareok, queue_name=f"{self.node_id}_rxq")
-        self._channel.queue_declare(queue=f"{self.node_id}_rxq", exclusive=True, callback=rx_cb)
+        rx_queue = f"{self.node_id}_rxq"
+        rlog.info(f"[{self.node_id}] Declaring RX queue: {rx_queue}")
+        cb = functools.partial(self.on_queue_declareok, queue_name=rx_queue)
+        self._channel.queue_declare(queue=rx_queue, exclusive=True, callback=cb)
 
-        
-        
-    # Bind a queue to the channel (queue_name will be queue-specific, as defined in functools.partial above)
     def on_queue_declareok(self, method_frame, queue_name):
-        """
-        Handles queue declaration and binds the queue to the exchange.
-        """
-        rlog.info(f"Queue declared: {queue_name}")
+        rlog.info(f"[{self.node_id}] Queue declared: {queue_name}")
         if queue_name == self._txq:
-            # Bind global TX queue to the exchange
+            # Bind global queue
             self._channel.queue_bind(queue=self._txq, exchange=self._MAINEXCHANGE)
-            rlog.info(f"Global TX queue {queue_name} bound to exchange {self._MAINEXCHANGE}")
-        elif queue_name == f"{self.node_id}_rxq":
-            # Bind RX queue and start consuming
-            cb = functools.partial(self.on_bindok, queue=method_frame.method.queue, queue_name=queue_name)
-            self._channel.queue_bind(queue=method_frame.method.queue, exchange=self._MAINEXCHANGE, callback=cb)
-        
-    # If the bind succeeded, log the success
-    def on_bindok(self, _unused_frame, queue, queue_name):
-        
-        rlog.info(f"Successfully bound queue {queue_name}/{queue} to exchange {self._MAINEXCHANGE}!")
-        self.start_consuming(queue=queue, queue_name=queue_name)
-        
-    # The function to start consuming from our queues bound to the channel
-    def start_consuming(self, queue, queue_name):
-        """
-        Starts consuming messages from the queue.
-        """
-        self._consuming = True
-        rlog.info(f"Node ID {self.node_id} is starting to consume on {queue_name}.")
-        if queue_name == f"{self.node_id}_rxq":
-            self._rxq = queue
-            self._rxq_tag = self._channel.basic_consume(
-                queue=self._rxq,
-                on_message_callback=self.safe_callback,  # Use safe callback wrapper
-                auto_ack=True
-            )
+            rlog.info(f"[{self.node_id}] Bound global TX queue to exchange.")
         else:
-            rlog.error("Queue not found.")
-            self.stop()
-            
-    def safe_callback(self, channel, method, properties, body):
-        """
-        Wrapper for handling callback execution with error handling.
-        """
+            # This must be {node_id}_rxq
+            self._channel.queue_bind(
+                queue=queue_name,
+                exchange=self._MAINEXCHANGE,
+                routing_key=queue_name,
+                callback=functools.partial(self.on_bindok, queue_name=queue_name)
+            )
+
+    def on_bindok(self, _unused_frame, queue_name):
+        rlog.info(f"[{self.node_id}] Bound RX queue: {queue_name} to exchange.")
+        # Send any pending messages now that channel is ready
+        while self._pending_messages:
+            msg = self._pending_messages.pop(0)
+            self.send(msg)
+        self.start_consuming(queue_name)
+
+    # --------------------------
+    # Consuming
+    # --------------------------
+
+    def start_consuming(self, rx_queue_name):
+        rlog.info(f"[{self.node_id}] Starting consumer on {rx_queue_name}.")
+        self._channel.basic_consume(
+            queue=rx_queue_name,
+            on_message_callback=self._safe_callback,
+            auto_ack=True
+        )
+
+    def _safe_callback(self, channel, method, properties, body):
         try:
             self._callback(channel, method, properties, body)
         except Exception as e:
-            rlog.error(f"Error in consumer callback: {e}")
-            rlog.debug("Message causing error: %s", body)
-            
-    def on_cancelok(self, _unused_frame, queue_name):
-        rlog.info(f"RabbitMQ successfully closed queue {queue_name}")
-        
+            rlog.error(f"[{self.node_id}] Error in user callback: {e}")
+
+    # --------------------------
+    # Publishing
+    # --------------------------
+
     def send(self, message):
         """
-        Publish a message to the global TX queue via the exchange.
+        Publish a message to the global TX queue. If channel isn't ready, queue it.
         """
-        rlog.info(f"Publishing message to global TX queue {self._txq}")
-        
-        self._channel.basic_publish(exchange=self._MAINEXCHANGE, routing_key=self._txq, body=message)
+        if self._channel and self._channel.is_open:
+            try:
+                rlog.info(f"[{self.node_id}] Sending message to {self._txq}.")
+                self._channel.basic_publish(
+                    exchange=self._MAINEXCHANGE,
+                    routing_key=self._txq,
+                    body=message
+                )
+            except Exception as e:
+                rlog.error(f"[{self.node_id}] Publish failed: {e}")
+        else:
+            rlog.warning(f"[{self.node_id}] Channel not open, queuing message.")
+            self._pending_messages.append(message)
+   
 
 class NodeClient:
     
@@ -294,10 +263,10 @@ class NodeClient:
         self._message_queue = []
         self._receive_callback = receive_callback or self.__default_receive_callback
         
-        self._rabbit_manager = RabbitManager(self.node_id, self.node_name, self.__receive)
+        self._rabbit_manager = AsyncioRabbitManager(self.node_id, self.node_name, self.__receive)
         
-    def start(self):
-        self._rabbit_manager.start()
+    async def start(self):
+        await self._rabbit_manager.start()
             
     # The internal receive for a NodeClient instance, users should NOT call this
     # The Rabbit rx consumer will call this method
@@ -316,6 +285,7 @@ class NodeClient:
         """
         Default method for handling received messages.
         """
+        clog.info(f"Node {self.node_id} received a message: {message}")
         self._message_queue.append(message)
         
     def receive(self):
@@ -333,7 +303,7 @@ class NodeClient:
         """
         Close the connection to the rabbit daemon.
         """
-        self.stop()
+        pass
         
             
     # This function won't stop the main connection the server is running for the brokers,
@@ -471,7 +441,7 @@ async def test_sender( aliases : list, auto=False, rate=None, size_bounds=[10, 1
     node_clients = {}
     for alias in this_aliases:
         node_clients[alias] = NodeClient(alias, f"{alias}_node")
-        node_clients[alias].start()
+        await node_clients[alias].start()
     
     
     while True:
