@@ -78,17 +78,27 @@ class SimRabbitManager:
         
     def stop(self):
         """Gracefully stop the RabbitMQ connection"""
+        if self._stopping:
+            rlog.warning("Stop already in progress, skipping.")
+            return
+
         rlog.info(f"Stopping sim {self.sim_name}")
         self._stopping = True
 
         # Close the channel if it's open
         if self._channel and self._channel.is_open:
             try:
-                cb = functools.partial(self.on_cancelok, queue_name=self._txq)
-                self._channel.basic_cancel(self._txq_tag, cb)
+                # Cancel the consumer and delete the queue explicitly
+                cb_cancel = functools.partial(self.on_cancelok, queue_name=self._txq)
+                self._channel.basic_cancel(self._txq_tag, cb_cancel)
+
+                # Explicit queue deletion added
+                cb_delete = functools.partial(self.on_queue_deleteok, queue_name=self._txq)
+                self._channel.queue_delete(queue=self._txq, callback=cb_delete)
             except pika.exceptions.ChannelWrongStateError:
                 rlog.warning("Channel already closing, skipping cancel.")
-            self._channel.close()
+                self._stopping = False  # Reset the flag as stopping failed
+            return  # Wait for callback before closing channel
 
         # Close the connection only if it is open and not already closing
         if self._connection and not self._connection.is_closed and not self._connection.is_closing:
@@ -98,6 +108,11 @@ class SimRabbitManager:
             self._connection.ioloop.stop()
         else:
             rlog.warning("Connection already closing or closed.")
+
+
+    def on_queue_deleteok(self, _unused_frame, queue_name):
+        rlog.info(f"Queue {queue_name} successfully deleted.")
+
 
             
     def on_connection_open(self, connection_obj):
