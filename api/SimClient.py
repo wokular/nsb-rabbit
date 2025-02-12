@@ -1,5 +1,6 @@
 import socket
 import nsb_payload as nsbp
+import nsb_payload_pb2 as nsbp2
 import struct
 import logging
 import random
@@ -238,12 +239,16 @@ class SimClient:
         """
         slog.info("Sim Client received message")
         
-        data = json.loads(body)
-        header = data["header"]
-        body = data["body"]
-        slog.info(f"Received message from {header['srcid']} to {header['dstid']}")
+        msg = nsbp2.Message.FromString(body)
         
-        self.send(header['srcid'], header['dstid'], body)
+        header = msg.header
+        body = msg.body
+        slog.info(f"Received message from {header.srcid} to {header.dstid}")
+        
+        # Simulator stuff here
+        
+        # Send the message onwards
+        self.send(header.srcid, header.dstid, body)
         
         
         
@@ -266,21 +271,15 @@ class SimClient:
         Send a message back to a node
         """
         
-         # Create a JSON structure to hold our data in a message
-        msg = {
-            "header": {
-                "type": nsbp.MSG_TYPES.OH_DELIVER_MSG,
-                "dataLen": len(message),
-                "srcid": src_id,
-                "dstid": dest_id
-            },
-            "body": message
-        }
-        # Stringify message from json
-        msg_str = json.dumps(msg)
+        # Utilize protobuf to ensure compatibility
+        header = nsbp2.Header(dataLen=len(message), srcid=src_id, dstid=dest_id)
+        msg = nsbp2.Message(header=header, body=message)
+       
+        # Stringify message from protobuf format to bytes
+        msg_bytes = msg.SerializeToString()
         
         # Send the message to the destination NodeClient
-        self._rabbit_manager.send(msg_str, f"{dest_id}_rxq")
+        self._rabbit_manager.send(msg_bytes, f"{dest_id}_rxq")
 
 
 if __name__ == "__main__":

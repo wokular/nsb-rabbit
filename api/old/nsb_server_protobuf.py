@@ -475,6 +475,7 @@ class NSBServer(object):
                     raise KeyboardInterrupt
                 events = self.sel.select(timeout=None)
                 for key, mask in events:
+                    print("Got a key")
                     if key.data is None:
 
                         # client = Client(key.fileobj, self.sel, self)
@@ -485,6 +486,7 @@ class NSBServer(object):
                         # client = self.clients[hash_]
                         # client.service_connection(key, mask)
                         try:
+                            print("Debug here")
                             self.service_connection(key, mask)
                         except Exception as e:
                             # slog.error(f"Caught exception, terminating connection:\n{e}")
@@ -538,15 +540,19 @@ class NSBServer(object):
         data = key.data
         pktData = ''.encode()
         header = None
+        print("To here?")
         # Check for reads or writes.
         if mask & selectors.EVENT_READ:
             # At event, it should be ready for read. Read the header first
             header, pktData = self.recvData(sock)
+        print("And what about here?", header)
         # If header is None, then the connection is closed.
         if not header or not header.type:
             return
         # Use the header to look up the client to return a Client object.
+        print("Does it get here?")
         client = self.clientLookup(header)
+        print("Does not get here")
         # If the client is not found, then the connection is closed.
         if not client:
             # Raise error and print out header information
@@ -635,13 +641,14 @@ class NSBServer(object):
         Receives data from the socket and deserializes using Protobuf.
         Returns a tuple of the header and the data.
         """
+        print("Yurr")
         # Receive and deserialize the header first.
         header_data = sock.recv(nsbp.CH_HEADER_SIZE)
         if not header_data:
             slog.debug(f"Closing connection to {sock}.")
             self.unregister_and_close(sock)
             return None, None
-        
+        print("Is here")
         # Deserialize the header using Protobuf
         header_msg = messaging_pb2.HeaderMessage()
         try:
@@ -649,6 +656,8 @@ class NSBServer(object):
         except Exception as e:
             slog.error(f"Failed to parse header: {e}")
             return None, None
+        
+        print("Is here too")
         
         slog.debug(f"Received header: type={header_msg.type}, len={header_msg.data_len}, "
                 f"srcid={header_msg.srcid}, dstid={header_msg.dstid}")
@@ -671,6 +680,7 @@ class NSBServer(object):
             slog.debug(f"Message ID: {msg_id}")
         
         # Return the deserialized header and the received data.
+        print("Returning: ", header_msg, data)
         return header_msg, data
 
 
@@ -718,6 +728,7 @@ class NSBServer(object):
         """
         Lookup the client object based on the header.
         """
+        print("Enters here")
         if header.type == nsbp.MSG_TYPES.OH_DELIVER_MSG:
             if header.dstid in self.node_reference:
                 return self.node_reference[header.dstid]

@@ -1,13 +1,39 @@
-## AppClient implementation guidelines:
+Notes for installing AMQP-CPP:
 
-1) Only one instance of AppClient will be used. 
-1a) Further Details
-- ~~AppClient stores messages temporarily for RPCs, to make sure the right response comes for the right sent message. ServerExchange creates pseudo-client objects that act as pipes between the AppClient client and the SimClient client. As such, creating multiple AppClient instances means trouble for ServerExchange, who will~~ LOOK INTO POSSIBILILTY OF CREATING MULTIPLE INSTANCES OF APP CLIENT (performance, feasability, etc. Is it problematic? With response queues being exclusive to each instance, but common SENDMSGCH etc queues, will multiple AppClient instances matter? Maybe with push model it will be)
-- The AppClient is intended to be used across the user's client library with only one instance. ^ ties into above
+- cd into api if not already 
+- prereq of cmake installed
 
-2) `send()` will need a unique user-provided ID. This is for message state and message journey tracking purposes. For example, if I sent message A with msg_id "some_id_1" from client "10.0.0.1", I can use that message ID to track the state of the message on client "10.0.0.1" (if its been sent into the sim network, been delivered, etc). For network implementation, it's required that this ID be an IPv4 address
+- git clone repo: (ssh) git clone git@github.com:CopernicaMarketingSoftware/AMQP-CPP.git amqpcpp/
+-- clone it into the amqpcpp dir
 
-3) When creating the instance of AppClient, pass in callbacks that will handle responses from the server for returned data such as the message's state (initiated by `getMessageState`) or the received message (initiated by `receive`). These callbacks are expected to be asynchronous, and will be called as soon as the ServerExchange has returned something to the client.
-3a) Currently, `receive` and `getMessageState` are being forced into synchronicity to make it compatible with sychronous calls. However, this defeats the performance gains of asynchrnocity througout the rest of the code. For example, `getMessageState` sends a message to the server asking for the state of some message with the user-provided message ID. It sends this message, and instead of finishing and allowing the next call, it's forced to wait and check for the ServerExchange reply, and then return this message state. This makes calling `getMessageState` incredibly simple, as you can just provide the message ID and expect back the message's state from the ServerExchange. Despite this current implementation, the most natural usage would just be for the user to provide callbacks to the AppClient during initialization, and then when a response to a `getMessageState` or `receive` (temporarily req-resp based vs coming push model) call is received, the RabbitMQ/Pika data will be stripped away and the message will be passed into the callback, for user handling. 
+- build it
+-- cd amqpcpp
+-- mkdir build && cd build
+-- cmake .. -DAMQP-CPP_BUILD_SHARED=OFF -DAMQP-CPP_LINUX_TCP=OFF -DCMAKE_OSX_ARCHITECTURES=arm64
+-- sudo cmake --build . --target install
+--- might encounter a permissions error with installing the libamqpcpp.a file into /usr/local/lib, try sudo
 
-4) Because AppClient is used for every potential entity (platoons of vehicles, groups of some device, etc), the user is required to call `send`, `receive`, and `getMessageState` with some form of source ID (UUID-compliant), which is neccessary for entity/client object tracking in ServerExchange. For example, if we want to send message A through the simulated network, a source ID is required to identify where the message is coming from. `send` also requires destination ID for this method, in order to send the message to the right client destination.
+Notes for installing dependencies for cpp simclient version:
+- Use homebrew if macos/linux, or only apt for linux:
+-- brew install boost openssl
+or 
+-- sudo apt install libboost-dev libssl-dev
+
+
+
+- Need to use these flags -lboost_system -lssl -lcrypto -lpthread
+
+How to compile cpp simclient
+
+- cd to simcpp
+- mkdir build && cd build
+- if using macos with m1/m2:
+-- cmake .. -DCMAKE_OSX_ARCHITECTURES=arm64 && make -j$(sysctl -n hw.ncpu)
+- else (macos/linux):
+-- cmake .. && make -j$(nproc)
+
+
+- Compile program, making sure to include -lamqpcpp flag (clang/gcc)
+- Need to use these flags -lboost_system -lssl -lcrypto -lpthread
+-- example: g++ -g -Wall -lamqcpp my-amqp-cpp.c -o my-amqp-cpp
+

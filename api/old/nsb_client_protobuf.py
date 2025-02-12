@@ -13,7 +13,10 @@ import asyncio
 from aioconsole import ainput
 
 # Set up logging for server.
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(f"(client)")
 rlog = logging.getLogger(f"(receiver)")
 # Set rlog level to DEBUG.
@@ -30,6 +33,7 @@ Destination ID (4 Bytes)
 Message Type (1 Byte)
 """
 
+
 def ip_to_int(ip):
     """
     Convert an IP address to an integer.
@@ -37,8 +41,9 @@ def ip_to_int(ip):
     # FQDN -> IPV4
     ip = socket.gethostbyname(ip)
     # IPV4 -> uint32. The return is a tuple. hence "alias,"
-    ip, = struct.unpack("!I", socket.inet_pton(socket.AF_INET, ip))
+    (ip,) = struct.unpack("!I", socket.inet_pton(socket.AF_INET, ip))
     return ip
+
 
 def int_to_ip(ip_int):
     """
@@ -47,6 +52,7 @@ def int_to_ip(ip_int):
     # uint32 -> IPV4
     ip = socket.inet_ntop(socket.AF_INET, struct.pack("!I", ip_int))
     return ip
+
 
 class NSBApplicationClient:
     def __init__(self, server_addr=NSB_SERVER_ADDR):
@@ -66,7 +72,7 @@ class NSBApplicationClient:
         """
         # Close the socket.
         self.sock.close()
-        
+
     def send(self, src_id, dest_id, message):
         message_length = len(message)
 
@@ -93,7 +99,7 @@ class NSBApplicationClient:
                 return 1
 
     def receive(self, dest_id):
-    # Prepare the protobuf message
+        # Prepare the protobuf message
         recv_msg = messaging_pb2.ReceiveMessage()
         recv_msg.header.type = nsbp.MSG_TYPES.CH_RECV_MSG
         recv_msg.header.data_len = 0
@@ -104,7 +110,9 @@ class NSBApplicationClient:
         self.sock.send(recv_msg.SerializeToString())
 
         # Receive and parse the reply
+        print("Gets here")
         reply = self.sock.recv(1024)
+        print("Does not get here")
         reply_msg = messaging_pb2.MessageReply()
         reply_msg.ParseFromString(reply)
 
@@ -114,7 +122,13 @@ class NSBApplicationClient:
             return src_addr, dest_addr, reply_msg.data
 
 
-async def test_sender(connector : NSBApplicationClient, aliases : list, auto=False, rate=None, size_bounds=[10, 100]):
+async def test_sender(
+    connector: NSBApplicationClient,
+    aliases: list,
+    auto=False,
+    rate=None,
+    size_bounds=[10, 100],
+):
     while True:
         # Ensure that if auto is on, rate is not None.
         if auto and rate is None:
@@ -153,8 +167,8 @@ async def test_sender(connector : NSBApplicationClient, aliases : list, auto=Fal
         # If the message is blank, use a random byte string of random length between 1 and 100.
         if msg == "":
             msg = os.urandom(random.randint(*size_bounds))
-            #msg = os.urandom(9) #for testing purpose 
-            #msg = os.urandom(random.randint(10, 100))
+            # msg = os.urandom(9) #for testing purpose
+            # msg = os.urandom(random.randint(10, 100))
         else:
             msg = msg.encode()
         # Print the message.
@@ -177,9 +191,12 @@ async def test_sender(connector : NSBApplicationClient, aliases : list, auto=Fal
             logger.error(f"Message not sent, error occurred.")
         # If auto is True, wait for the rate.
         if auto:
-            await asyncio.sleep(1/float(rate))
+            await asyncio.sleep(1 / float(rate))
 
-async def test_receiver(connector : NSBApplicationClient, aliases : list, polling_delay=0.1):
+
+async def test_receiver(
+    connector: NSBApplicationClient, aliases: list, polling_delay=0.1
+):
     """
     This test receiver will cycle through the aliases and receive messages.
     """
@@ -192,7 +209,9 @@ async def test_receiver(connector : NSBApplicationClient, aliases : list, pollin
             # Print the alias.
             rlog.debug(f"\t> {alias}")
             # Receive a message.
+            print("This?")
             reply = connector.receive(alias)
+            print("Hee")
             # If the reply is not None, print the message receive information.
             if reply is not None:
                 rlog.info(f"\tMessage received.")
@@ -205,8 +224,8 @@ async def test_receiver(connector : NSBApplicationClient, aliases : list, pollin
             else:
                 rlog.debug(f"\t\tNo message received.")
         # Sleep to create a delay between receiving messages.
+        print("This")
         await asyncio.sleep(polling_delay)
-        
 
 
 async def main_manual(map_file_name, size_bounds):
@@ -217,7 +236,7 @@ async def main_manual(map_file_name, size_bounds):
     # Create a dictionary of aliases.
     aliasmap = {}
     for line in lines:
-        alias, ip = line.split(':')
+        alias, ip = line.split(":")
         alias = alias.strip()
         ip = ip.strip()
         aliasmap[alias] = ip
@@ -233,8 +252,9 @@ async def main_manual(map_file_name, size_bounds):
     # Gather the test sender and receiver.
     await asyncio.gather(
         test_receiver(connector, aliases),
-        test_sender(connector, aliases, size_bounds=size_bounds)
+        test_sender(connector, aliases, size_bounds=size_bounds),
     )
+
 
 async def main_auto(map_file_name, rate, size_bounds):
     # Get list of addresses from aliasmap.txt.
@@ -243,7 +263,7 @@ async def main_auto(map_file_name, rate, size_bounds):
     # Create a dictionary of aliases.
     aliasmap = {}
     for line in lines:
-        alias, ip = line.split(':')
+        alias, ip = line.split(":")
         alias = alias.strip()
         ip = ip.strip()
         aliasmap[alias] = ip
@@ -259,21 +279,41 @@ async def main_auto(map_file_name, rate, size_bounds):
     # Gather the test sender and receiver.
     await asyncio.gather(
         test_receiver(connector, aliases),
-        test_sender(connector, aliases, auto=True, rate=rate, size_bounds=size_bounds)
+        test_sender(connector, aliases, auto=True, rate=rate, size_bounds=size_bounds),
     )
-    
-    
+
 
 # Run the main function.
 if __name__ == "__main__":
     import argparse
+
     # Use argparse to get the map file name.
     parser = argparse.ArgumentParser()
-    parser.add_argument("-m", "--map_file_name", help="The name of the alias map file.", required=True)
-    parser.add_argument("-a", "--auto", help="Automatically send messages at selected rate.", action="store_true")
-    parser.add_argument("-r", "--rate", help="The rate at which to send messages in messages/second (0, 1000]).", type=float, default=10)
+    parser.add_argument(
+        "-m", "--map_file_name", help="The name of the alias map file.", required=True
+    )
+    parser.add_argument(
+        "-a",
+        "--auto",
+        help="Automatically send messages at selected rate.",
+        action="store_true",
+    )
+    parser.add_argument(
+        "-r",
+        "--rate",
+        help="The rate at which to send messages in messages/second (0, 1000]).",
+        type=float,
+        default=10,
+    )
     # Pass in two values as bounds for the random message size.
-    parser.add_argument("-b", "--bounds", help="The bounds for the random message size.", nargs=2, type=int, default=[10, 100])
+    parser.add_argument(
+        "-b",
+        "--bounds",
+        help="The bounds for the random message size.",
+        nargs=2,
+        type=int,
+        default=[10, 100],
+    )
     args = parser.parse_args()
     map_file_name = args.map_file_name
     # Check if the map file exists.
@@ -304,14 +344,9 @@ if __name__ == "__main__":
         print("Exiting program...")
         exit(0)
 
-
-
-
-
     # msg = b"Hello, World!"
     # result = send("10.0.0.4", "10.0.0.5", msg)
     # if not result:
     #     logger.info(f"TEST SUCCESS.")
     # else:
     #     logger.error(f"TEST FAILURE.")
-    

@@ -1,5 +1,6 @@
 import socket
 import nsb_payload as nsbp
+import nsb_payload_pb2 as nsbp2
 import struct
 import logging
 import random
@@ -273,6 +274,13 @@ class NodeClient:
     def __receive(self, channel, method, props, body):
         # Either store message in self._message_queue or call the user's provided callback
         try:
+            
+            msg = nsbp2.Message.FromString(body)
+            
+            header = msg.header
+            body = msg.body
+            clog.info(f"Received message from {header.srcid}")
+            
             if self._receive_callback is self.__default_receive_callback:
                 self.__default_receive_callback(body)
             else:
@@ -321,21 +329,15 @@ class NodeClient:
         automatically assign a client ID to the message, which will be available in self.sent_msg_ids as a mapping between the assigned ID and message
         """
 
-        # Create a JSON structure to hold our data in a message
-        msg = {
-            "header": {
-                "type": nsbp.MSG_TYPES.CH_SEND_MSG,
-                "dataLen": len(message),
-                "srcid": self.node_id,
-                "dstid": dest_id, 
-            },
-            "body": json.dumps(message)
-        }
-        # Stringify message from json
-        msg_str = json.dumps(msg)
+        # Utilize protobuf to ensure compatibility
+        header = nsbp2.Header(dataLen=len(message), srcid=self.node_id, dstid=dest_id)
+        msg = nsbp2.Message(header=header, body=message)
+       
+        # Stringify message from protobuf format to bytes
+        msg_bytes = msg.SerializeToString()
         
         # Send the message
-        self._rabbit_manager.send(msg_str)
+        self._rabbit_manager.send(msg_bytes)
         
         
 """
