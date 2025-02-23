@@ -1,7 +1,5 @@
-import socket
 import nsb_payload as nsbp
 import nsb_payload_pb2 as nsbp2
-import struct
 import logging
 import random
 import os
@@ -9,9 +7,9 @@ import asyncio
 from aioconsole import ainput
 import uuid
 import time
+from datetime import datetime
 import json
 import functools
-import threading
 
 # Rabbit/Pika
 import pika
@@ -105,7 +103,7 @@ class AsyncioRabbitManager:
         Gracefully stop the connection/channel without blocking the asyncio loop.
         """
         if self._stopping:
-            rlog.info("Stop called again; already stopping.")
+            rlog.debug("Stop called again; already stopping.")
             return
 
         rlog.info(f"Stopping RabbitManager for node {self.node_id}")
@@ -132,7 +130,7 @@ class AsyncioRabbitManager:
     # --------------------------
 
     def on_connection_open(self, connection):
-        rlog.info(f"[{self.node_id}] Connection open, creating channel.")
+        rlog.debug(f"[{self.node_id}] Connection open, creating channel.")
         self._connection.channel(on_open_callback=self.on_channel_open)
 
     def on_connection_open_error(self, _unused_connection, err):
@@ -142,22 +140,22 @@ class AsyncioRabbitManager:
 
     def on_connection_closed(self, _unused_connection, reason):
         if self._stopping:
-            rlog.info(f"[{self.node_id}] Connection closed (stopping): {reason}")
+            rlog.debug(f"[{self.node_id}] Connection closed (stopping): {reason}")
         else:
             rlog.warning(f"[{self.node_id}] Connection closed unexpectedly: {reason}")
         self._channel = None
 
     def on_channel_open(self, channel):
-        rlog.info(f"[{self.node_id}] Channel opened successfully.")
+        rlog.debug(f"[{self.node_id}] Channel opened successfully.")
         self._channel = channel
         self._channel.add_on_close_callback(self.on_channel_closed)
         self.setup_exchange()
 
     def on_channel_closed(self, ch, reason):
-        rlog.warning(f"[{self.node_id}] Channel closed: {reason}")
+        rlog.debug(f"[{self.node_id}] Channel closed: {reason}")
         self._channel = None
         if not self._stopping and self._connection.is_open:
-            rlog.info("Closing the connection because the channel closed unexpectedly.")
+            rlog.warning("Closing the connection because the channel closed unexpectedly.")
             self._connection.close()
 
     # --------------------------
@@ -165,7 +163,7 @@ class AsyncioRabbitManager:
     # --------------------------
 
     def setup_exchange(self):
-        rlog.info(f"[{self.node_id}] Declaring exchange: {self._MAINEXCHANGE}.")
+        rlog.debug(f"[{self.node_id}] Declaring exchange: {self._MAINEXCHANGE}.")
         cb = functools.partial(self.on_exchange_declareok, exchange_name=self._MAINEXCHANGE)
         self._channel.exchange_declare(
             exchange=self._MAINEXCHANGE,
@@ -174,27 +172,27 @@ class AsyncioRabbitManager:
         )
 
     def on_exchange_declareok(self, _unused_frame, exchange_name):
-        rlog.info(f"[{self.node_id}] Exchange declared: {exchange_name}")
+        rlog.debug(f"[{self.node_id}] Exchange declared: {exchange_name}")
         self.setup_global_txq()
         self.setup_rx_queue()
 
     def setup_global_txq(self):
-        rlog.info(f"[{self.node_id}] Setting up global TX queue {self._txq}")
+        rlog.debug(f"[{self.node_id}] Setting up global TX queue {self._txq}")
         cb = functools.partial(self.on_queue_declareok, queue_name=self._txq)
         self._channel.queue_declare(queue=self._txq, exclusive=False, callback=cb)
 
     def setup_rx_queue(self):
         rx_queue = f"{self.node_id}_rxq"
-        rlog.info(f"[{self.node_id}] Declaring RX queue: {rx_queue}")
+        rlog.debug(f"[{self.node_id}] Declaring RX queue: {rx_queue}")
         cb = functools.partial(self.on_queue_declareok, queue_name=rx_queue)
         self._channel.queue_declare(queue=rx_queue, exclusive=True, callback=cb)
 
     def on_queue_declareok(self, method_frame, queue_name):
-        rlog.info(f"[{self.node_id}] Queue declared: {queue_name}")
+        rlog.debug(f"[{self.node_id}] Queue declared: {queue_name}")
         if queue_name == self._txq:
             # Bind global queue
             self._channel.queue_bind(queue=self._txq, exchange=self._MAINEXCHANGE)
-            rlog.info(f"[{self.node_id}] Bound global TX queue to exchange.")
+            rlog.debug(f"[{self.node_id}] Bound global TX queue to exchange.")
         else:
             # This must be {node_id}_rxq
             self._channel.queue_bind(
@@ -205,7 +203,7 @@ class AsyncioRabbitManager:
             )
 
     def on_bindok(self, _unused_frame, queue_name):
-        rlog.info(f"[{self.node_id}] Bound RX queue: {queue_name} to exchange.")
+        rlog.debug(f"[{self.node_id}] Bound RX queue: {queue_name} to exchange.")
         # Send any pending messages now that channel is ready
         while self._pending_messages:
             msg = self._pending_messages.pop(0)
@@ -217,7 +215,7 @@ class AsyncioRabbitManager:
     # --------------------------
 
     def start_consuming(self, rx_queue_name):
-        rlog.info(f"[{self.node_id}] Starting consumer on {rx_queue_name}.")
+        rlog.debug(f"[{self.node_id}] Starting consumer on {rx_queue_name}.")
         self._channel.basic_consume(
             queue=rx_queue_name,
             on_message_callback=self._safe_callback,
@@ -240,16 +238,27 @@ class AsyncioRabbitManager:
         """
         if self._channel and self._channel.is_open:
             try:
-                rlog.info(f"[{self.node_id}] Sending message to {self._txq}.")
+                
+                # Check for pending messages. 
+                # If any exist, send them and clear self._pending_messages
+                while len(self._pending_messages) > 0:
+                    self._channel.basic_publish(
+                        exchange=self._MAINEXCHANGE,
+                        routing_key=self._txq,
+                        body=self._pending_messages.pop(0)
+                    )
+                
+                # Send message
+                rlog.debug(f"[{self.node_id}] sending message to {self._txq}.")
                 self._channel.basic_publish(
                     exchange=self._MAINEXCHANGE,
                     routing_key=self._txq,
                     body=message
                 )
             except Exception as e:
-                rlog.error(f"[{self.node_id}] Publish failed: {e}")
+                rlog.error(f"[{self.node_id}] publish failed: {e}")
         else:
-            rlog.warning(f"[{self.node_id}] Channel not open, queuing message.")
+            rlog.warning(f"[{self.node_id}] channel not open, queuing message.")
             self._pending_messages.append(message)
    
 
@@ -279,21 +288,21 @@ class NodeClient:
             
             header = msg.header
             body = msg.body
-            clog.info(f"Received message from {header.srcid}")
+            clog.debug(f"[{self.node_id}] Received message from {header.srcid}")
             
             if self._receive_callback is self.__default_receive_callback:
                 self.__default_receive_callback(body)
             else:
                 self._receive_callback(body)
         except Exception as e:
-            clog.error(f"Error in user-provided callback: {e}")
-            clog.debug("Message causing error: %s", body)
+            clog.error(f"[{self.node_id}] Error in user-provided callback: {e}")
+            clog.debug(f"[{self.node_id}] Message causing error: %s", body)
             
     def __default_receive_callback(self, message):
         """
         Default method for handling received messages.
         """
-        clog.info(f"Node {self.node_id} received a message: {message}")
+        clog.info(f"[{self.node_id}] Received: `{message}`")
         self._message_queue.append(message)
         
     def receive(self):
@@ -303,7 +312,7 @@ class NodeClient:
         if self._message_queue:
             return self._message_queue.pop(0)
         else:
-            clog.warning("Cannot return message from empty queue")
+            clog.warning(f"[{self.node_id}] Cannot return message from empty queue")
             return
         
         
@@ -328,6 +337,7 @@ class NodeClient:
         and that message's state can be tracked using the same ID. If no ID is provided, the server will 
         automatically assign a client ID to the message, which will be available in self.sent_msg_ids as a mapping between the assigned ID and message
         """
+        clog.info(f"[{self.node_id}] Sending: `{message}`")
 
         # Utilize protobuf to ensure compatibility
         header = nsbp2.Header(dataLen=len(message), srcid=self.node_id, dstid=dest_id)
@@ -352,7 +362,7 @@ send()
 
         
 
-async def test_sender( aliases : list, auto=False, rate=None, size_bounds=[10, 100]):
+async def test_sender(aliases: list, auto=False, rate=None, size_bounds=[10, 100]):
     clog.info("Starting test sender..")
     
     # Copy list of aliases to a new list.
@@ -364,73 +374,50 @@ async def test_sender( aliases : list, auto=False, rate=None, size_bounds=[10, 1
         node_clients[alias] = NodeClient(alias, f"{alias}_node")
         await node_clients[alias].start()
     
-    
     while True:
-        
         # Ensure that if auto is on, rate is not None.
         if auto and rate is None:
             clog.error(f"Auto is on, but rate is None.")
-            raise ValueError(f"Auto is on, but rate is None.")
-            exit(1)
-            
+            raise ValueError("Auto is on, but rate is None.")
+        
         # Copy list of aliases to a new list.
         this_aliases = aliases.copy()
         
         for alias in this_aliases:
-            
             src_id = alias
             
-            # Prompt for destination address.
+            # Prompt for destination address (manual) or pick one randomly (auto).
             dest_id = await ainput("Destination ID: ") if not auto else ""
-            # If the destination ID is blank, choose a random address from aliases.
             while dest_id == "" or dest_id == src_id:
                 dest_id = random.choice(this_aliases)
                 
-            # Prompt for message.
-            msg = await ainput("Message: ") if not auto else f"{src_id} is sending a message to {dest_id} at {str(time.time())}"
+            # Prompt for message (manual) or generate one (auto).
+            msg = (
+                await ainput("Message: ")
+                if not auto 
+                else f"{src_id} -> {dest_id} @ {time.strftime('%H:%M:%S', time.localtime())}"
+            )
 
-            # Print source, destination and message.
-            clog.info(f"Source: {src_id}")
-            clog.info(f"Destination: {dest_id}")
-            clog.info(f"Message: {msg}")
+            # Print source, destination, and message.
+            clog.debug(f"Source: {src_id}")
+            clog.debug(f"Destination: {dest_id}")
+            clog.debug(f"Message: {msg}")
 
-            # Press enter to continue.
+            # Press enter to continue (manual).
             if not auto:
                 await ainput("Press enter to continue...")
 
             # Send the message.
             connector = node_clients[alias]
             connector.send(dest_id, msg)
-            clog.info(f"Message sent.")
             
-            
-        # If auto is True, wait for the rate.
-        if auto:
-            await asyncio.sleep(1/float(rate))
-
-async def test_receiver(connector : NodeClient, aliases : list, polling_delay=1):
-    """
-    This test receiver will cycle through the aliases and receive messages.
-    """
-    rlog.info(f"Starting test receiver...")
-    while True:
-        # Copy list of aliases to a new list.
-        this_aliases = aliases.copy()
-        # Loop through the aliases.
-        for alias in this_aliases:
-            # Print the alias.
-            clog.debug(f"Alias\t> {alias}")
-            # Receive a message.
-            reply = connector.receive(alias)
-            # If the reply is not None, print the message receive information.
-            if reply is not None:
-                clog.info(f"Receiver Reply: {reply.decode()}")
-            # If the reply is None, print that no message was received.
-            else:
-                rlog.debug(f"\t\tNo message received.")
-        # Sleep to create a delay between receiving messages.
-        await asyncio.sleep(polling_delay)
-        
+            # Only stagger/wait if auto is enabled.
+            if auto:
+                # Rate is messages/second, so base wait = (1 / rate)
+                base_delay = 1 / float(rate)
+                # E.g., vary between 80% and 120% of that base
+                random_delay = random.uniform(0.8, 1.2) * base_delay
+                await asyncio.sleep(random_delay)
 
 
 async def main_manual(map_file_name, size_bounds):
@@ -458,7 +445,6 @@ async def main_manual(map_file_name, size_bounds):
     # Gather the test sender and receiver.
     try:
         await asyncio.gather(
-            # test_receiver(connector, aliases),
             test_sender(connector, aliases, size_bounds=size_bounds)
         )
     except:
