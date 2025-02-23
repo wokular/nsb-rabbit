@@ -6,3 +6,6 @@ simcpp/
 amqpcpp/
 nsb_payload
 nsb_payload_pb2.py
+api/build
+api/rabbitmq-c
+api/amqpclient
