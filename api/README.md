@@ -7,7 +7,8 @@
 
 Install the community RabbitMQ C-edition into your api/ directory, we will need it for the C++ wrapper later on.
 
-`git clone git@github.com:alanxz/rabbitmq-c.git rabbitmq-c/`
+Via SSH: `git clone git@github.com:alanxz/rabbitmq-c.git rabbitmq-c/`
+Via HTTPS: `git clone https://github.com/alanxz/rabbitmq-c.git`
 
 Build it:
 `cd rabbitmq-c && mkdir build && cd build`
@@ -57,7 +58,8 @@ Test it works:
 
 - cd into api if not already
 - clone the repo
-`git clone git@github.com:nsb-ucsc/SimpleAmqpClient-Updated.git amqpclient/`
+Via SSH: `git clone git@github.com:nsb-ucsc/SimpleAmqpClient-Updated.git amqpclient/`
+Via HTTPS: `git clone https://github.com/nsb-ucsc/SimpleAmqpClient-Updated.git amqpclient/`
 - install prereqs (primarily boost):
 	-	macos via homebrew: `brew install boost`
 	-	windows via vcpkg: `vcpkg install boost`
@@ -103,9 +105,9 @@ You can:
 #### Using CMake (Recommended)
 I wrote out the CMakeLists.txt file so compiling and running everything will be as smooth as possible. This assumes CMake, protobuf, abseil (see below), and the above libraries have been installed correctly and work with all the tests up to this point.
 
-Install abseil (necessary for protobuf C++):
-macOS via Homebrew: `brew install abseil
-`
+Install abseil (necessary for protobuf C++) and protobuf:
+macOS via Homebrew: `brew install protobuf`
+macOS via Homebrew: `brew install abseil`
 
 Then:
 
@@ -167,7 +169,12 @@ g++ -std=c++17 -o RunSimClient RunSimClient.cpp \
 
 -lSimpleAmqpClient -lboost_system -lboost_filesystem -lrabbitmq -lprotobuf
 ```
-  
+
+## Further notes:
+
+Issues with architecture mismatch (x86 terminal and homebrew despite apple silicon, arm64 cmake/protobuf etc)
+protoc version mismatch to libprotobuf
+https://doc.omnetpp.org/omnetpp/InstallGuide.pdf
 
 ## Footnotes
 The installation process was quite difficult, but the main problems I had were with inproper boost/protobuf/abseil installation, as well as finding the appropriate directories where the compiled libraries (rabbitmq-c, libsimpleamqpclient, libsimclient) were being kept. I've provided the CMake for compiling RunSimClient easily, and this instruction guide to help streamline the process as much as possible. The installation steps above were all performed on an M2 Macbook on Ventura (13.5.1), so Windows + Linux steps for installation will differ. In the future, I'm planning to write installation steps for each platform.

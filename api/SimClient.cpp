@@ -100,10 +100,63 @@ void SimRabbitManager::stop()
     }
 }
 
+AmqpClient::Envelope::ptr_t SimRabbitManager::oneOffConsume(double timeoutSeconds, const std::string &queueName)
+{
+    // We do a "one-off" consume: open a consumer, block for one message (or timeout),
+    // then cancel the consumer and return the Envelope if we got one, or nullptr otherwise.
+
+    // Start a new consumer on our dedicated "consume_channel"
+    std::string consumerTag = consume_channel->BasicConsume(queueName, "");
+
+    // Use a local Envelope pointer.
+    AmqpClient::Envelope::ptr_t envelope;
+    bool success = false;
+    try
+    {
+        // Convert seconds to milliseconds
+        long timeoutMs = timeoutSeconds * 1000;
+        success = consume_channel->BasicConsumeMessage(consumerTag, envelope, timeoutMs);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Error in oneOffConsume BasicConsumeMessage: " << e.what() << std::endl;
+    }
+
+    // Cancel the consumer so we don't keep it open (connection/channel stays open but we stop consuming messages)
+    try
+    {
+        consume_channel->BasicCancel(consumerTag);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Error in oneOffConsume BasicCancel: " << e.what() << std::endl;
+    }
+
+    // If we timed out or errored, success==false => envelope is probably null
+    return success ? envelope : nullptr;
+}
+
 SimClient::SimClient(const std::string &sim_name) : sim_name(sim_name)
 {
     rabbit_manager = std::make_unique<SimRabbitManager>(sim_name, [this](const std::string &msg)
                                                         { this->handleMessage(msg); });
+}
+
+void SimClient::stop()
+{
+    // Guard against rabbit_manager not existing or already stopped
+    if (rabbit_manager)
+    {
+        rabbit_manager->stop();
+    }
+}
+
+SimClient::~SimClient()
+{
+    // Make sure we stop cleanly
+    stop();
+    // Optionally reset the pointer here to free resources immediately
+    // rabbit_manager.reset();
 }
 
 void SimClient::send(const std::string &src_id, const std::string &dest_id, const std::string &message)
@@ -137,4 +190,67 @@ void SimClient::handleMessage(const std::string &message)
 
     // Echo message for now
     send(header.srcid(), header.dstid(), msg.body());
+}
+
+bool SimClient::listen_fetch(int timeout_seconds, std::function<void(const std::string &)> callback)
+{
+    // 1. Connect (open channels)
+    AmqpClient::Channel::OpenOpts opts;
+    opts.host = "localhost";
+    opts.port = 5672;
+    opts.auth = AmqpClient::Channel::OpenOpts::BasicAuth("guest", "guest");
+
+    auto local_channel = AmqpClient::Channel::Open(opts);
+
+    // We'll listen on the same queue as the normal "continuous" consumer example,
+    // but you can point this to any queue you want.
+    std::string main_exchange = "main_router";
+    std::string queue_name = "global_txq";
+
+    // 2. Ensure the exchange/queue/binding exist (or skip if they exist externally)
+    local_channel->DeclareExchange(main_exchange, AmqpClient::Channel::EXCHANGE_TYPE_DIRECT, false, false);
+    local_channel->DeclareQueue(queue_name, false, false, false, false);
+    local_channel->BindQueue(queue_name, main_exchange, queue_name);
+
+    // 3. Start consuming
+    std::string consumer_tag = local_channel->BasicConsume(queue_name, "");
+
+    // 4. Wait for a message or time out
+    bool got_message = false;
+    try
+    {
+        // BasicConsumeMessage has an overload that takes a timeout in milliseconds.
+        // We'll convert `timeout_seconds` to milliseconds.
+        AmqpClient::Envelope::ptr_t envelope;
+        bool success = local_channel->BasicConsumeMessage(consumer_tag, envelope, timeout_seconds * 1000);
+
+        if (success && envelope)
+        {
+            // We got a message; call the callback
+            got_message = true;
+            callback(envelope->Message()->Body());
+        }
+    }
+    catch (const std::exception &ex)
+    {
+        std::cerr << "Error in listen_fetch: " << ex.what() << std::endl;
+    }
+
+    // 5. Cancel consumer to clean up
+    try
+    {
+        local_channel->BasicCancel(consumer_tag);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Error canceling consumer: " << e.what() << std::endl;
+    }
+
+    // The local_channel goes out of scope here, automatically closing.
+    return got_message;
+}
+
+AmqpClient::Envelope::ptr_t SimClient::ConsumeOneMessageWithTimeout(double timeoutSeconds)
+{
+    return rabbit_manager->oneOffConsume(timeoutSeconds, "global_txq");
 }

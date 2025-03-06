@@ -17,6 +17,7 @@ public:
     void connect();
     void stop();
     void send(const std::string &message, const std::string &dest_queue);
+    AmqpClient::Envelope::ptr_t oneOffConsume(double timeoutSeconds, const std::string &queueName = "global_txq");
 
 private:
     std::string sim_name;
@@ -36,7 +37,11 @@ class SimClient
 {
 public:
     SimClient(const std::string &sim_name);
+    ~SimClient();
+    void stop();
     void send(const std::string &src_id, const std::string &dest_id, const std::string &message);
+    bool listen_fetch(int timeout_seconds, std::function<void(const std::string &)> callback);
+    AmqpClient::Envelope::ptr_t ConsumeOneMessageWithTimeout(double timeoutSeconds);
 
 private:
     std::string sim_name;

@@ -47,3 +47,36 @@ int main()
     std::cout << "SimClient shut down." << std::endl;
     return 0;
 }
+
+// EXAMPLE CODE FOR LISTEN_FETCH
+
+// #include "SimClient.h"
+// #include <iostream>
+// #include <string>
+
+// void handle_msg(const std::string &msg)
+// {
+//     std::cout << "Got a message! " << msg << std::endl;
+//     // ... parse it, etc.
+// }
+
+// int main()
+// {
+//     // Construct your SimClient. This object can hold any needed config or be ephemeral.
+//     SimClient simClient("TestClient");
+
+//     // In your scheduler or main loop, call `listen_fetch`:
+//     std::cout << "Listening for a single message, up to 10 seconds." << std::endl;
+//     bool received = simClient.listen_fetch(/*timeout_seconds=*/10, handle_msg);
+
+//     if (!received)
+//     {
+//         std::cout << "No message arrived within 10 seconds." << std::endl;
+//     }
+//     else
+//     {
+//         std::cout << "A message was received and handled. Exiting." << std::endl;
+//     }
+
+//     return 0;
+// }
