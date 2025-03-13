@@ -186,7 +186,7 @@ void SimClient::handleMessage(const std::string &message)
     }
 
     const nsb::Header &header = msg.header();
-    std::cout << "Received message from " << header.srcid() << " to " << header.dstid() << std::endl;
+    std::cout << "[" << this->sim_name << "] Received message from " << header.srcid() << " to " << header.dstid() << std::endl;
 
     // Echo message for now
     send(header.srcid(), header.dstid(), msg.body());
