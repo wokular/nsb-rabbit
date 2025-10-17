@@ -485,7 +485,7 @@ if __name__ == "__main__":
     # Use argparse to get the map file name.
     parser = argparse.ArgumentParser()
     parser.add_argument("-m", "--map_file_name", help="The name of the alias map file.", required=True)
-    parser.add_argument("-a", "--auto", help="Automatically send messages at selected rate.", action="store_true")
+    parser.add_argument("-a", "--auto", help="Automatically send messages at selected rate.", action="store_true", default=False)
     parser.add_argument("-r", "--rate", help="The rate at which to send messages in messages/second (0, 1000]).", type=float, default=10)
     # Pass in two values as bounds for the random message size.
     parser.add_argument("-b", "--bounds", help="The bounds for the random message size.", nargs=2, type=int, default=[10, 100])
