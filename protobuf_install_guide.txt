@@ -1,0 +1,12 @@
+Quick reference for getting started with protobuf here. 
+Guide was made under case that you could get the normal non-protobuf version running (ie deps alr installed)
+
+1) Set up a python venv for installing dependencies if you haven't already
+2) Activate the venv: `source user/path/to/.venv/bin/activate`
+3) Install google's python api: `pip3 install --upgrade google-api-python-client`
+4) Install protoc for compiling protobuf headers: macOS `brew install protobuf`, Linux: `apt install -y protobuf-compiler`. Instructions from https://grpc.io/docs/protoc-installation/
+5) Install protobuf: `pip3 install messaging_pb2`
+6) cd to whatever dir contains your messaging.proto (in our case, nsb/api)
+7) Compile the protobuf headers: `protoc --python_out=. messaging.proto`, stored in messaging_pb2.py
+8) Run the server: `python3 nsb_server_protobuf.py -m aliasmap.txt` where aliasmap.txt is any map of nodes
+9) Run the app client: `python3 nsb_client_protobuf.py -m aliasmap.txt -a -r 20` where again aliasmap.txt is any map of nodes

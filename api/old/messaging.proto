@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+message Header {
+  uint32 type = 1;
+  uint32 data_len = 2;
+  uint32 srcid = 3;
+  uint32 dstid = 4;
+  uint32 msgid = 5;
+}
+
+message AckMessage {
+  Header header = 1;
+  uint32 return_code = 2;
+  uint32 msg_id = 3;
+}
+
+message StateMessage {
+  Header header = 1;
+  uint32 state = 2;
+}
+
+message ResponseMessage {
+  Header header = 1;
+  bytes data = 2;
+}
+
+message DeliveryAck {
+  Header header = 1;
+  uint32 return_code = 2;
+}
+
+message IPMessage {
+  uint32 ip = 1;
+}
+
+message NodeMessage {
+  uint32 nodeid = 1;
+}
+
+message SendMessage {
+  Header header = 1;
+  bytes data = 2;
+}
+
+message ReceiveMessage {
+  Header header = 1;
+  uint32 return_code = 2;
+  uint32 msg_id = 3;
+}
+
+message MessageReply {
+  Header header = 1;
+  bytes data = 2;
+}
+
+message HeaderMessage {
+    int32 type = 1;
+    int32 data_len = 2;
+    int32 srcid = 3;
+    int32 dstid = 4;
+    int32 msgid = 5;
+}

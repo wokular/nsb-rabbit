@@ -10,6 +10,7 @@ import time
 from ctypes import *
 import nsb_payload as nsbp
 import struct
+import messaging_pb2
 
 import logging
 
@@ -70,7 +71,7 @@ class Client(object):
         self.server = server
         # Create a queue for each message state, including a message map.
         self.msgmap = dict()
-        self.txq = list()
+        self.txq = list() 
         self.transitq = list()
         self.rxq = list()
         clog.info(f"\tClient {clientIp} initialized.")
@@ -164,12 +165,15 @@ class Client(object):
         # Create format.
         fmt = nsbp.CH_HEADER_FORMAT + nsbp.CH_SEND_MSG_ACK_FORMAT
         # Create ack buffer.
-        ackbuf = struct.pack(fmt,
-            nsbp.MSG_TYPES.CH_SEND_MSG_ACK,
-            nsbp.CH_SEND_MSG_ACK_SIZE, header.srcid,
-            header.dstid, returnCode, msgid)
+        ack_msg = messaging_pb2.AckMessage()
+        ack_msg.header.type = nsbp.MSG_TYPES.CH_SEND_MSG_ACK
+        ack_msg.header.data_len = nsbp.CH_SEND_MSG_ACK_SIZE
+        ack_msg.header.srcid = header.srcid
+        ack_msg.header.dstid = header.dstid
+        ack_msg.header.msgid = msgid
+        ack_msg.return_code = returnCode
         # Send ack.
-        sock.sendall(ackbuf)
+        sock.sendall(ack_msg.SerializeToString())
         clog.debug(f"\tAck sent.")
 
     def sendChMsgState(self, sock, pktData):
@@ -188,11 +192,15 @@ class Client(object):
         # Create format.
         fmt = nsbp.CH_HEADER_FORMAT + nsbp.CH_MSG_STATE_FORMAT
         # Create response buffer.
-        statebuf = struct.pack(fmt,
-            nsbp.MSG_TYPES.CH_MSG_STATE,
-            nsbp.CH_MSG_STATE_SIZE, 0, 0, state, msgid)
+        state_msg = messaging_pb2.StateMessage()
+        state_msg.header.type = nsbp.MSG_TYPES.CH_MSG_STATE
+        state_msg.header.data_len = nsbp.CH_MSG_STATE_SIZE
+        state_msg.header.srcid = 0  # Placeholder
+        state_msg.header.dstid = 0  # Placeholder
+        state_msg.header.msgid = msgid
+        state_msg.state = state
         # Send response.
-        sock.sendall(statebuf)
+        sock.sendall(state_msg.SerializeToString())
         clog.info(f"\tResponse with message ID {msgid} at state {state} sent.")
 
     def sendChRespMsg(self, sock):
@@ -207,8 +215,13 @@ class Client(object):
             # If not, send a response with no data.
             fmt = "%s%ss" % (nsbp.CH_HEADER_FORMAT, len(pktData))
             # if DEBUG: print ("FORMAT %s" % fmt)
-            retbuf = struct.pack(fmt, nsbp.MSG_TYPES.CH_RESP_MSG,
-                len(pktData), 0, 0, pktData)
+            response_msg = messaging_pb2.ResponseMessage()
+            response_msg.header.type = nsbp.MSG_TYPES.CH_RESP_MSG
+            response_msg.header.data_len = len(pktData)
+            response_msg.header.srcid = 0 
+            response_msg.header.dstid = 0  
+            response_msg.header.msgid = 0  # Assuming msgid is 0 when no data
+            response_msg.data = pktData  # Byte data
         else:
             clog.info(f"\tMessage found. Forwarding to app at {self.rxq[0]}...")
             # If there are messages, send the first one (packed).
@@ -216,13 +229,18 @@ class Client(object):
             msg = self.msgmap[msgid]
             fmt = "%s%ss" % (nsbp.CH_HEADER_FORMAT, len(msg.data))
             # if DEBUG: print ("FORMAT %s" % fmt)
-            retbuf = struct.pack(fmt, nsbp.MSG_TYPES.CH_RESP_MSG,
-                len(msg.data), msg.header.srcid, msg.header.dstid, msg.data)
+            response_msg = messaging_pb2.ResponseMessage()
+            response_msg.header.type = nsbp.MSG_TYPES.CH_RESP_MSG
+            response_msg.header.data_len = len(msg.data)
+            response_msg.header.srcid = msg.header.srcid
+            response_msg.header.dstid = msg.header.dstid
+            response_msg.header.msgid = msg.header.msgid
+            response_msg.data = msg.data 
             # Remove message from message map.
             self.msgmap.pop(msgid)
             clog.info(f"\tMessage {msgid} retrieved and removed from message map.")
         clog.debug(f"\tResponse buffer length: {len(retbuf)}")
-        sock.sendall(retbuf)
+        sock.sendall(response_msg.SerializeToString())
         clog.debug(f"\tResponse sent.")
 
     def sendOhRespMsg(self, sock):
@@ -236,8 +254,14 @@ class Client(object):
             clog.debug(f"\tNo messages to send.")
             fmt = "%s%ss" % (nsbp.OH_HEADER_FORMAT, len(pktData))
             # if DEBUG: print ("FORMAT %s" % fmt)
-            retbuf = struct.pack(fmt, nsbp.MSG_TYPES.OH_RESP_MSG,
-                len(pktData), 0, 0, 0, pktData)
+            response_msg = messaging_pb2.ResponseMessage()
+            response_msg.header.type = nsbp.MSG_TYPES.OH_RESP_MSG
+            response_msg.header.data_len = len(pktData)
+            response_msg.header.srcid = 0  
+            response_msg.header.dstid = 0  
+            response_msg.header.msgid = 0  
+            response_msg.data = pktData
+
         else:
             # If there are outgoing messages, send the first one (packed).
             clog.info(f"\tMessage found. Sending...")
@@ -248,12 +272,19 @@ class Client(object):
             # Set the destination client using the reference.
             dstClient = server.ip_reference[msg.header.dstid]
             # Pack message.
-            retbuf = struct.pack(fmt, nsbp.MSG_TYPES.OH_RESP_MSG,
-                len(msg.data), self.nodeId, dstClient.nodeId, msgid, msg.data)
+            response_msg = messaging_pb2.ResponseMessage()
+            response_msg.header.type = nsbp.MSG_TYPES.OH_RESP_MSG
+            response_msg.header.data_len = len(msg.data)
+            response_msg.header.srcid = self.nodeId
+            response_msg.header.dstid = dstClient.nodeId
+            response_msg.header.msgid = msgid
+            response_msg.data = msg.data
+
             # Add message to transit queue.
             self.add2q(msg, nsbp.MSG_Q.MSGQ_TRANSIT)
-        clog.debug(f"\tResponse buffer length: {len(retbuf)}")
-        sock.sendall(retbuf)
+        serialized_response = response_msg.SerializeToString()
+        clog.debug(f"\tResponse buffer length: {len(serialized_response)}")
+        sock.sendall(serialized_response)
         clog.debug(f"\tResponse sent.")
 
     def transitq2rxq (self, srcClient, header, pktData):
@@ -282,11 +313,16 @@ class Client(object):
         clog.info(f"Sending delivery ack to simulator...")
         # Create and send acknowledgment.
         fmt = nsbp.OH_HEADER_FORMAT + nsbp.OH_DELIVER_MSG_ACK_FORMAT
-        ackbuf = struct.pack(fmt,
-            nsbp.MSG_TYPES.OH_DELIVER_MSG_ACK,
-            nsbp.OH_DELIVER_MSG_ACK_SIZE, header.srcid,
-            header.dstid, header.msgid, returnCode)
-        sock.sendall(ackbuf)
+        delivery_ack_msg = messaging_pb2.DeliveryAck()
+        delivery_ack_msg.header.type = nsbp.MSG_TYPES.OH_DELIVER_MSG_ACK
+        delivery_ack_msg.header.data_len = nsbp.OH_DELIVER_MSG_ACK_SIZE
+        delivery_ack_msg.header.srcid = header.srcid
+        delivery_ack_msg.header.dstid = header.dstid
+        delivery_ack_msg.header.msgid = header.msgid
+        delivery_ack_msg.return_code = returnCode
+
+        # Serialize and send the protobuf message
+        sock.sendall(delivery_ack_msg.SerializeToString())
         clog.info(f"\tAck sent.")
         
 """
@@ -439,6 +475,7 @@ class NSBServer(object):
                     raise KeyboardInterrupt
                 events = self.sel.select(timeout=None)
                 for key, mask in events:
+                    print("Got a key")
                     if key.data is None:
 
                         # client = Client(key.fileobj, self.sel, self)
@@ -449,6 +486,7 @@ class NSBServer(object):
                         # client = self.clients[hash_]
                         # client.service_connection(key, mask)
                         try:
+                            print("Debug here")
                             self.service_connection(key, mask)
                         except Exception as e:
                             # slog.error(f"Caught exception, terminating connection:\n{e}")
@@ -470,9 +508,9 @@ class NSBServer(object):
             except Exception as e:
                 slog.error(f"Caught exception:\n{e}")
                 raise
-        # finally:
-        #     #self.sel.close()
-        #     unregister_and_close(sock)
+        #finally:
+        #self.sel.close()
+        #unregister_and_close(sock)
 
     """
     Functions to facilitate connections between multiple clients and the server. Based on a guide
@@ -502,15 +540,19 @@ class NSBServer(object):
         data = key.data
         pktData = ''.encode()
         header = None
+        print("To here?")
         # Check for reads or writes.
         if mask & selectors.EVENT_READ:
             # At event, it should be ready for read. Read the header first
             header, pktData = self.recvData(sock)
+        print("And what about here?", header)
         # If header is None, then the connection is closed.
         if not header or not header.type:
             return
         # Use the header to look up the client to return a Client object.
+        print("Does it get here?")
         client = self.clientLookup(header)
+        print("Does not get here")
         # If the client is not found, then the connection is closed.
         if not client:
             # Raise error and print out header information
@@ -593,38 +635,55 @@ class NSBServer(object):
         except OSError as e:
             slog.error(f"Socket could not close:\n{e}")
 
-    def recvData (self, sock):
+
+    def recvData(self, sock):
         """
-        Receive data from the socket. Returns a tuple of the header and the data.
+        Receives data from the socket and deserializes using Protobuf.
+        Returns a tuple of the header and the data.
         """
-        # At event, it should be ready for read. Read the header first.
-        recv_data = sock.recv(nsbp.CH_HEADER_SIZE)
-        h = Header()
-        data = ''.encode()
-        # Check if any data was received.
-        if recv_data:
-            # Unpack the header.
-            h.type, h.dataLen, h.srcid, h.dstid = struct.unpack(nsbp.CH_HEADER_FORMAT, recv_data)
-            slog.debug("Received type: %d len %d, src=%d dst=%d" %
-                (h.type, h.dataLen, h.srcid, h.dstid))
-            _data = ''.encode()
-            # Check the scope (CH vs. OH) of the incoming data.
-            if h.type > nsbp.MSG_TYPES.CH_MSGS_END:
-                h.msgid, = struct.unpack("="+nsbp.MSGID_FORMAT, sock.recv(nsbp.MSGID_SIZE))
-                slog.debug("Message ID: %s" % h.msgid)
-            # Read the data in its entirety.
-            while (len(data) < h.dataLen):
-                _data = sock.recv(h.dataLen - len(_data))
-                data += _data
-            # while True:
-            #     _data = sock.recv(1024)
-            #     if not _data: break
-            #     data += _data
-        else:
+        print("Yurr")
+        # Receive and deserialize the header first.
+        header_data = sock.recv(nsbp.CH_HEADER_SIZE)
+        if not header_data:
             slog.debug(f"Closing connection to {sock}.")
             self.unregister_and_close(sock)
-        # Return the header and the data.
-        return (h, data)
+            return None, None
+        print("Is here")
+        # Deserialize the header using Protobuf
+        header_msg = messaging_pb2.HeaderMessage()
+        try:
+            header_msg.ParseFromString(header_data)
+        except Exception as e:
+            slog.error(f"Failed to parse header: {e}")
+            return None, None
+        
+        print("Is here too")
+        
+        slog.debug(f"Received header: type={header_msg.type}, len={header_msg.data_len}, "
+                f"srcid={header_msg.srcid}, dstid={header_msg.dstid}")
+        
+        # Prepare to receive the remaining data based on the data length in the header.
+        data = b''  # Use a byte string to accumulate the data.
+        data_len = header_msg.data_len
+
+        while len(data) < data_len:
+            packet = sock.recv(data_len - len(data))
+            if not packet:
+                slog.debug(f"Connection closed while reading data from {sock}.")
+                self.unregister_and_close(sock)
+                return header_msg, None
+            data += packet
+        
+        # Deserialize the message if it's available
+        if header_msg.type > nsbp.MSG_TYPES.CH_MSGS_END:
+            msg_id = int.from_bytes(sock.recv(nsbp.MSGID_SIZE), byteorder='big')
+            slog.debug(f"Message ID: {msg_id}")
+        
+        # Return the deserialized header and the received data.
+        print("Returning: ", header_msg, data)
+        return header_msg, data
+
+
     def init_clients(self, filename, nodeid_type="int"):
         """
         Initialize all the clients.
@@ -638,7 +697,8 @@ class NSBServer(object):
                 # IP string -> IPV4
                 ip = socket.gethostbyname(ip)
                 # IPV4 -> uint32. The return is a tuple. hence "alias,"
-                ip, = struct.unpack("!I", socket.inet_pton(socket.AF_INET, ip))
+                ip_msg = messaging_pb2.IPMessage()
+                ip_msg.ip = int.from_bytes(socket.inet_pton(socket.AF_INET, ip), byteorder='big')
                 # Convert the nodeid depending on the type.
                 if nodeid_type == "int":
                     # Convert node to int.
@@ -647,7 +707,9 @@ class NSBServer(object):
                     # IP string -> IPV4
                     nodeid = socket.gethostbyname(nodeid)
                     # Convert IP to uint32.
-                    nodeid, = struct.unpack("!I", socket.inet_pton(socket.AF_INET, nodeid))
+                    node_msg = messaging_pb2.IPMessage()
+                    node_msg.ip = int.from_bytes(socket.inet_pton(socket.AF_INET, nodeid), byteorder='big')
+                    nodeid = node_msg.ip  # Set nodeid to the IP from protobuf
                 print (ip, nodeid)
                 client = Client(ip, nodeid, self)
                 self.ip_reference[ip] = client
@@ -666,6 +728,7 @@ class NSBServer(object):
         """
         Lookup the client object based on the header.
         """
+        print("Enters here")
         if header.type == nsbp.MSG_TYPES.OH_DELIVER_MSG:
             if header.dstid in self.node_reference:
                 return self.node_reference[header.dstid]

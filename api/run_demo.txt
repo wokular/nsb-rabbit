@@ -1,0 +1,4 @@
+docker start -i rabbitmqmanagement
+source /Users/alex/Desktop/Code/.venv/bin/activate
+python3 SimClient.py -m aliasmap.txt
+python3 NodeClient.py -m aliasmap.txt -a -r .5

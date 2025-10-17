@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package nsb;
+
+message Message {
+    Header header = 1;
+    string body = 2;
+}
+
+message Header {
+    int32 dataLen = 1;
+    string srcid = 2;
+    string dstid = 3;
+}
